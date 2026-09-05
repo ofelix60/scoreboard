@@ -33,3 +33,7 @@ build/
 
 # OS
 .DS_Store
+
+
+# Misc
+scratch.txt
