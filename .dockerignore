@@ -8,3 +8,7 @@ __pycache__/
 
 Dockerfile
 .dockerignore
+
+bench.sh
+benchmarks.md
+scratch.txt

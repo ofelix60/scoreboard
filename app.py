@@ -1,10 +1,10 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Score(BaseModel):
-    player: str
-    score: int
+    player: str = Field(min_length=1)
+    score: int = Field(ge=0)
 
 
 app = FastAPI()
@@ -30,9 +30,9 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/scores")
-def scores(payload: Score):
-    entry = {"player": payload.player, "score": payload.score}
+@app.post("/scores", status_code=201)
+def create_score(payload: Score):
+    entry = payload.model_dump()
     all_scores.append(entry)
     all_scores.sort(key=lambda e: e["score"], reverse=True)
 
@@ -40,7 +40,7 @@ def scores(payload: Score):
 
 
 @app.get("/scores/top")
-def top_scores():
-    top_n = all_scores[0:10]
+def top_scores(limit) -> list[dict]:
+    top_n = all_scores[0 : int(limit)]
 
     return top_n
