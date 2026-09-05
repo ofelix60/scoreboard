@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 
 
@@ -9,19 +9,17 @@ class Score(BaseModel):
 
 app = FastAPI()
 
-all_scores = [
-    {"player": "UJM", "score": 987},
-    {"player": "YHN", "score": 700},
-    {"player": "IKI", "score": 457},
-    {"player": "PPP", "score": 456},
-    {"player": "OLO", "score": 321},
-    {"player": "TGB", "score": 230},
-    {"player": "RFV", "score": 220},
-    {"player": "WSX", "score": 200},
-    {"player": "EDC", "score": 120},
-    {"player": "QAZ", "score": 10},
-    {"player": "QAZ", "score": 50},
-    {"player": "QAZ", "score": 5000},
+scores = [
+    Score(player="UJM", score=987),
+    Score(player="GRS", score=700),
+    Score(player="BGT", score=457),
+    Score(player="ZGR", score=456),
+    Score(player="POS", score=321),
+    Score(player="BEE", score=230),
+    Score(player="SEE", score=220),
+    Score(player="CHI", score=120),
+    Score(player="FEE", score=10),
+    Score(player="REE", score=5000),
 ]
 
 
@@ -32,15 +30,16 @@ def health():
 
 @app.post("/scores", status_code=201)
 def create_score(payload: Score):
-    entry = payload.model_dump()
-    all_scores.append(entry)
-    all_scores.sort(key=lambda e: e["score"], reverse=True)
 
-    return entry
+    scores.append(payload)
+    scores.sort(key=lambda e: e.score, reverse=True)
+
+    return payload
 
 
 @app.get("/scores/top")
-def top_scores(limit) -> list[dict]:
-    top_n = all_scores[0 : int(limit)]
+def top_scores(limit: int = Query(ge=1, le=100)) -> list[Score]:
+    # def top_scores(limit: int = 10) -> list[Score]:
+    top_n = scores[0 : int(limit)]
 
     return top_n
