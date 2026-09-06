@@ -1,4 +1,9 @@
-from fastapi import FastAPI, Query
+import os
+from typing import Annotated
+
+import psycopg
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Query
 from pydantic import BaseModel, Field
 
 
@@ -8,21 +13,24 @@ class Score(BaseModel):
 
 
 app = FastAPI()
+load_dotenv()
+DB_URL: str | None = os.getenv("DB_URL")
 
-scores = [
-    Score(player="WEE", score=987),
-    Score(player="WII", score=700),
-    Score(player="PEE", score=457),
-    Score(player="PEA", score=457),
-    Score(player="CHI", score=457),
-    Score(player="CHEE", score=456),
-    Score(player="POS", score=321),
-    Score(player="BEE", score=230),
-    Score(player="SEE", score=220),
-    Score(player="WII", score=120),
-    Score(player="FEE", score=10),
-    Score(player="REE", score=5000),
-]
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+
+db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+
+def get_connection():
+    with psycopg.connect(db_url) as conn:
+        yield conn
+
+
+Conn = Annotated[psycopg.Connection, Depends(get_connection)]
 
 
 @app.get("/health")
@@ -31,16 +39,24 @@ def health() -> dict:
 
 
 @app.post("/scores", status_code=201)
-def create_score(payload: Score) -> Score:
+def create_score(conn: Conn, payload: Score) -> Score:
+    q = "INSERT INTO scores (player, score) VALUES (%s, %s)"
 
-    scores.append(payload)
-    scores.sort(key=lambda e: e.score, reverse=True)
+    with conn.cursor() as cur:
+        cur.execute(q, (payload.player, payload.score))
+        conn.commit()
 
     return payload
 
 
 @app.get("/scores/top")
-def top_scores(limit: int = Query(10, ge=1, le=100)) -> list[Score]:
-    top_n = scores[0:limit]
+def top_scores(conn: Conn, limit: int = Query(10, ge=1, le=100)) -> list[Score]:
+    q = "SELECT * FROM scores ORDER BY score DESC LIMIT %s"
+
+    top_n = []
+    with conn.cursor() as cur:
+        cur.execute(q, (limit,))
+        for player, score in cur:
+            top_n.append(Score(player=player, score=score))
 
     return top_n
