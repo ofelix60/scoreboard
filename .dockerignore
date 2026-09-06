@@ -12,3 +12,5 @@ Dockerfile
 bench.sh
 benchmarks.md
 scratch.txt
+
+.env
