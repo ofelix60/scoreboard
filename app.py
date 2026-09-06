@@ -26,6 +26,10 @@ db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 
 def get_connection():
+    try:
+        pass
+    except psycopg.OperationalError as e:
+        raise ConnectionError(503, f"Database unavailable {e}")
     with psycopg.connect(db_url) as conn:
         yield conn
 
