@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         min_size=2,
         max_size=10,
         open=False,
-        timeout=5,
+        timeout=2,
         check=ConnectionPool.check_connection,
     )
     pool.open()
@@ -63,13 +63,20 @@ Conn = Annotated[psycopg.Connection, Depends(get_connection)]
 
 
 @app.get("/health")
-def health(conn: Conn) -> dict:
+def health() -> dict:
     try:
-        with conn.cursor() as cur:
+        with psycopg.connect(db_url, connect_timeout=1) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1")
-        return {"status": "ok", "database": "ok", "hostname": socket.gethostname()}
+        return {
+            "status": "ok",
+            "database": "ok",
+            "hostname": socket.gethostname(),
+        }
     except psycopg.OperationalError:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable",
+        )
 
 
 @app.post("/scores", status_code=201)
