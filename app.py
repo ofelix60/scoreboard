@@ -1,10 +1,25 @@
-import os
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import psycopg
-from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class AppSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        validate_assignment=True, case_sensitive=True, extra="ignore", env_file=".env"
+    )
+    DB_HOST: str
+    DB_PORT: int
+    DB_USER: str
+    DB_PASSWORD: str
+    DB_NAME: str
+
+
+settings = AppSettings()  # type: ignore
 
 
 class Score(BaseModel):
@@ -12,26 +27,28 @@ class Score(BaseModel):
     score: int = Field(ge=0)
 
 
-app = FastAPI()
-load_dotenv()
-DB_URL: str | None = os.getenv("DB_URL")
+db_url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
 
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
+pool = ConnectionPool(conninfo=db_url, min_size=2, max_size=10, open=False)
 
-db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    pool.open()
+    app.state.pool = pool
+    yield
+    pool.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def get_connection():
     try:
-        pass
+        with pool.connection() as conn:
+            yield conn
     except psycopg.OperationalError as e:
-        raise ConnectionError(503, f"Database unavailable {e}")
-    with psycopg.connect(db_url) as conn:
-        yield conn
+        raise HTTPException(503, f"Database unavailable:\n {e}")
 
 
 Conn = Annotated[psycopg.Connection, Depends(get_connection)]
@@ -55,7 +72,7 @@ def create_score(conn: Conn, payload: Score) -> Score:
 
 @app.get("/scores/top")
 def top_scores(conn: Conn, limit: int = Query(10, ge=1, le=100)) -> list[Score]:
-    q = "SELECT * FROM scores ORDER BY score DESC LIMIT %s"
+    q = "SELECT player, score FROM scores ORDER BY score DESC LIMIT %s"
 
     top_n = []
     with conn.cursor() as cur:
