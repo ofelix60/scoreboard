@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,11 +29,12 @@ class Score(BaseModel):
 
 db_url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
 
-pool = ConnectionPool(conninfo=db_url, min_size=2, max_size=10, open=False)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    pool = ConnectionPool(
+        conninfo=db_url, min_size=2, max_size=10, open=False, timeout=5
+    )
     pool.open()
     app.state.pool = pool
     yield
@@ -43,12 +44,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-def get_connection():
+def get_connection(request: Request):
+    pool: ConnectionPool = request.app.state.pool
     try:
         with pool.connection() as conn:
             yield conn
     except psycopg.OperationalError as e:
-        raise HTTPException(503, f"Database unavailable:\n {e}")
+        raise HTTPException(503, f"Database unavailable:\n{e}")
 
 
 Conn = Annotated[psycopg.Connection, Depends(get_connection)]
