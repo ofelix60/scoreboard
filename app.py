@@ -1,3 +1,4 @@
+import socket
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -33,7 +34,12 @@ db_url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_H
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = ConnectionPool(
-        conninfo=db_url, min_size=2, max_size=10, open=False, timeout=5
+        conninfo=db_url,
+        min_size=2,
+        max_size=10,
+        open=False,
+        timeout=5,
+        check=ConnectionPool.check_connection,
     )
     pool.open()
     app.state.pool = pool
@@ -57,8 +63,13 @@ Conn = Annotated[psycopg.Connection, Depends(get_connection)]
 
 
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health(conn: Conn) -> dict:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return {"status": "ok", "database": "ok", "hostname": socket.gethostname()}
+    except psycopg.OperationalError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 
 @app.post("/scores", status_code=201)

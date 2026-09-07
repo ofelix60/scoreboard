@@ -1,0 +1,5 @@
+localhost:8000
+
+reverse_proxy api1:8000 api2:8000 {
+	lb_policy       round_robin
+}
