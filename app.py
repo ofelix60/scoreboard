@@ -62,8 +62,16 @@ def get_connection(request: Request):
 Conn = Annotated[psycopg.Connection, Depends(get_connection)]
 
 
-@app.get("/health")
-def health() -> dict:
+@app.get("/livez")
+def livez() -> dict:
+    return {
+        "status": "ok",
+        "hostname": socket.gethostname(),
+    }
+
+
+@app.get("/readyz")
+def readyz() -> dict:
     try:
         with psycopg.connect(db_url, connect_timeout=1) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1")
@@ -85,7 +93,6 @@ def create_score(conn: Conn, payload: Score) -> Score:
 
     with conn.cursor() as cur:
         cur.execute(q, (payload.player, payload.score))
-        conn.commit()
 
     return payload
 
