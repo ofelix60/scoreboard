@@ -6,7 +6,7 @@ LB=caddy1
 .PHONY: \
 	vol_up vol_down \
 	net_up net_down \
-	db_up db_down db_stop \
+	db_up db_init db_down db_stop \
 	lb_up lb_down lb_stop \
 	api_build api_up api_down api_stop api_iterate api_logs \
 	app_up app_stop app_down app_destroy \
@@ -34,6 +34,12 @@ db_up: vol_up net_up
 		-v $(VOL):/var/lib/postgresql/data \
 		postgres:16
 
+db_init:
+	docker exec -i $(DB) psql \
+		-U $$(grep '^DB_USER=' .env | cut -d= -f2) \
+		-d $$(grep '^DB_NAME=' .env | cut -d= -f2) \
+		< schema.sql
+
 db_down:
 	docker rm -f $(DB)
 
@@ -41,14 +47,14 @@ db_stop:
 	docker stop $(DB)
 
 db_logs:
-	docker logs -t --tail $(DB)
+	docker logs -t --tail 20 $(DB)
 
 caddy_up:
 	docker run -d --name $(LB) \
 		--network $(NET) \
 		-p 8080:8000 \
 		-v $(CURDIR)/Caddyfile:/etc/caddy/Caddyfile \
-		caddy:2
+		caddy
 
 
 caddy_down:
@@ -58,7 +64,7 @@ caddy_stop:
 	docker stop $(LB)
 
 caddy_logs:
-	docker logs -t --tail $(LB)
+	docker logs -t --tail 20 $(LB)
 
 
 api_build:
@@ -103,6 +109,8 @@ app_up:
 	$(MAKE) db_up
 	$(MAKE) api_up
 	$(MAKE) caddy_up
+	$$(sleep 5)
+	$(MAKE) db_init
 
 app_stop:
 	$(MAKE) caddy_stop
@@ -118,6 +126,4 @@ app_destroy:
 	$(MAKE) app_down
 	$(MAKE) net_down
 	$(MAKE) vol_down
-
-
 
