@@ -88,15 +88,14 @@ api_build:
 	docker tag scoreboard:$(TAG) scoreboard:latest
 
 api_up: net_up
-	@test -n "$(TAG)" || (echo "Usage: make api_up TAG=v2.1"; exit 1)
 	docker run -d --name api1 \
 		--network $(NET) \
 		--env-file .env \
-		scoreboard:$(TAG)
+		scoreboard:latest
 	docker run -d --name api2 \
 		--network $(NET) \
 		--env-file .env \
-		scoreboard:$(TAG)
+		scoreboard:latest
 
 
 api_down:
@@ -125,7 +124,7 @@ lint:
 app_up:
 	$(MAKE) db_up
 	$(MAKE) db_init
-	$(MAKE) api_up TAG=latest
+	$(MAKE) api_up
 	$(MAKE) caddy_up
 
 app_stop:
