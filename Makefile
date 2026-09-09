@@ -33,6 +33,7 @@ db_up: vol_up net_up
 		-e POSTGRES_PASSWORD=$$(grep '^DB_PASSWORD=' .env | cut -d= -f2-) \
 		-e POSTGRES_DB=$$(grep '^DB_NAME=' .env | cut -d= -f2-) \
 		-v $(VOL):/var/lib/postgresql/data \
+		-m 1g \
 		postgres:16
 
 db_init:
@@ -69,6 +70,7 @@ caddy_up: net_up
 		--network $(NET) \
 		-p 8080:8000 \
 		-v $(CURDIR)/Caddyfile:/etc/caddy/Caddyfile \
+		-m 256m \
 		caddy:2.11
 
 
@@ -91,10 +93,12 @@ api_up: net_up
 	docker run -d --name api1 \
 		--network $(NET) \
 		--env-file .env \
+		-m 256m \
 		scoreboard:latest
 	docker run -d --name api2 \
 		--network $(NET) \
 		--env-file .env \
+		-m 256m \
 		scoreboard:latest
 
 
