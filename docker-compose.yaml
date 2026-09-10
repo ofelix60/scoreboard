@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:16
+    container_name: sb-db
+    networks:
+      - sb-net
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - sb-vol:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+
+  api:
+    # image: scoreboard:latest # prod
+    build: . # dev
+    networks:
+      - sb-net
+    env_file:
+      - .env
+    mem_limit: 256m
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+
+  caddy:
+    image: caddy:2.11
+    networks:
+      - sb-net
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    mem_limit: 256m
+    depends_on:
+      - api
+
+volumes:
+  sb-vol:
+networks:
+  sb-net:

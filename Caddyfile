@@ -1,10 +1,14 @@
 localhost:8000
 
-reverse_proxy api1:8000 api2:8000 {
+reverse_proxy {
+	dynamic a {
+		name api
+		port 8000
+		refresh 5s
+	}
 	lb_policy round_robin
-	health_uri /readyz
-	health_interval 10s
-	health_timeout 2s
-	health_fails 3
-	health_passes 2
+	fail_duration 30s
+	max_fails 2
+	unhealthy_status 5xx
+	lb_retries 2
 }
