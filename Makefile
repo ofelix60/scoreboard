@@ -8,6 +8,9 @@ up:
 	docker compose up -d --scale api=$(SCALE)
 
 down:
+	docker compose down
+
+destroy:
 	docker compose down -v
 
 fmt: 
