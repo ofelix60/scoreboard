@@ -7,3 +7,4 @@ data:
   DB_PORT: "5432"
   DB_USER: "postgres"
   DB_NAME: "scoreboard"
+  APP_BANNER: "hello-v4"
