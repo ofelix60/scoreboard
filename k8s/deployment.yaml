@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scoreboard-deployment
+  labels:
+    app: scoreboard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: scoreboard
+  template:
+    metadata:
+      labels:
+        app: scoreboard
+    spec:
+      containers:
+        - image: soixanteneuff/scoreboard@sha256:2cf2798b8b30bcb7a5c6b33bcca50f1b842ac24af89f8e78316f42cc0f92fdb9
+          name: scoreboard
+          ports:
+          - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: scoreboard-configmap
+            - secretRef:
+                name: scoreboard-secret
