@@ -14,7 +14,10 @@ spec:
       labels:
         app: scoreboard
       annotations:
-        checksum/config: "e85c7536985c81f44ce53057aa32a45d28d255c55c95bb42b3ee579d0b1a9483"
+        # Hash of the SOURCE manifest (configmap.yaml), not the live object.
+        # The live object carries uid/resourceVersion/creationTimestamp/managedFields,
+        # which change on their own — hashing those fires on non-changes and misses real ones.
+        checksum/config: "753d909f2a482d8b503a452d08554442480ae712c4e024db99eb022ab970a270"
     spec:
       imagePullSecrets:
         - name: regcred
@@ -23,11 +26,32 @@ spec:
           name: scoreboard
           ports:
           - containerPort: 8000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
           envFrom:
             - configMapRef:
                 name: scoreboard-configmap
             - secretRef:
                 name: scoreboard-secret
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 2
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 2
           volumeMounts:
             - name: config-volume
               mountPath: /etc/scoreboard
