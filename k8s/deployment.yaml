@@ -16,8 +16,10 @@ spec:
       annotations:
         checksum/config: "e85c7536985c81f44ce53057aa32a45d28d255c55c95bb42b3ee579d0b1a9483"
     spec:
+      imagePullSecrets:
+        - name: regcred
       containers:
-        - image: soixanteneuff/scoreboard@sha256:2cf2798b8b30bcb7a5c6b33bcca50f1b842ac24af89f8e78316f42cc0f92fdb9
+        - image: ghcr.io/ofelix60/scoreboard@sha256:2cf2798b8b30bcb7a5c6b33bcca50f1b842ac24af89f8e78316f42cc0f92fdb9
           name: scoreboard
           ports:
           - containerPort: 8000
