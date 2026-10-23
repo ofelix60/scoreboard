@@ -1,0 +1,10 @@
+apiVersion: v1
+data:
+  schema.sql: |
+    CREATE TABLE IF NOT EXISTS scores (
+        player TEXT NOT NULL,
+        score INTEGER NOT NULL CHECK (score >= 0)
+    );
+kind: ConfigMap
+metadata:
+  name: sb-db-initdb
