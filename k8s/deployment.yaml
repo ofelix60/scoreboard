@@ -60,3 +60,4 @@ spec:
         - name: config-volume
           configMap:
             name: scoreboard-configmap
+      serviceAccountName: scoreboard
