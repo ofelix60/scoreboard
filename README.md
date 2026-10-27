@@ -113,6 +113,12 @@ unreachable from outside. Verified empirically; it's why the `HEALTHCHECK` uses
 resolved in the builder with a cache mount, only the virtualenv copied forward.
 338MB → **66.6MB**. Runs as `USER 10001`.
 
+**Memory limits are measured, not guessed — where that's possible.** The API limit is
+~2.6× the observed peak under 15k requests at 100 concurrent; the Postgres limit is
+deliberately *not* usage-derived, because it exists to decide which process the OOM
+killer takes rather than to right-size anything. Numbers and reasoning in
+**[baseline-stats.md](baseline-stats.md)**.
+
 **Caddy's `dynamic a` upstream discovery was a knowing tradeoff.** It enabled
 `compose up --scale`, but it silently disabled active health checks, the admin API
 upstream list, and the `caddy_reverse_proxy_upstreams_healthy` metric — verified by
@@ -157,20 +163,27 @@ Known, not hidden. Each has a decided fix.
 ## Layout
 
 ```
-app.py                  FastAPI app, pool lifecycle, endpoints
-schema.sql              table definition
-Dockerfile              multi-stage, digest-pinned, non-root
-docker-compose.yaml     db + api + caddy, health-gated depends_on
-Caddyfile               reverse proxy, dynamic upstream discovery
-Makefile                up / down / destroy / fmt / lint
+app.py                    FastAPI app, pool lifecycle, endpoints
+schema.sql                table definition
+Dockerfile                multi-stage, digest-pinned, non-root
+docker-compose.yaml       db + api + caddy, health-gated depends_on
+Caddyfile                 reverse proxy, dynamic upstream discovery
+Makefile                  up / down / destroy / fmt / lint
+bench.sh                  build time + image size, appended to benchmarks.md
+baseline-stats.md         measured usage, and why each mem_limit is what it is
+.env.example              the five variables Compose needs
+.dockerignore             keeps .env and caches out of the build context
 k8s/
-  kind-cluster.yaml     3-node cluster, extraPortMappings, ingress-ready label
-  ingress-nginx.yaml    vendored controller-v1.15.1, nodeSelector patched
-  deployment.yaml       2 replicas, probes, resources, envFrom, imagePullSecrets
-  service.yaml          ClusterIP :80 → :8000
-  ingress.yaml          host-based routing
-  configmap.yaml        non-secret config
-  db-statefulset.yaml   Postgres + volumeClaimTemplates
-  db-service.yaml       headless
+  kind-cluster.yaml       3-node cluster, extraPortMappings, ingress-ready label
+  ingress-nginx.yaml      vendored controller-v1.15.1, nodeSelector patched
+  deployment.yaml         2 replicas, probes, resources, envFrom, imagePullSecrets
+  service.yaml            ClusterIP :80 → :8000
+  ingress.yaml            host-based routing
+  configmap.yaml          non-secret config
+  secret.example.yaml     shape of the Secret; the real one is gitignored
+  serviceaccount.yaml     zero-permission SA, token mount disabled
+  teammate-role.yaml      least-privilege Role + RoleBinding (pods/logs, no secrets)
+  db-statefulset.yaml     Postgres + volumeClaimTemplates
+  db-service.yaml         headless
   db-initdb-configmap.yaml
 ```

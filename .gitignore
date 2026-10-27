@@ -37,6 +37,5 @@ build/
 
 # Misc
 scratch.txt
-benchmarks.md
 secret.yaml
 db-secret.yaml
