@@ -29,6 +29,12 @@ WORKDIR /app
 # Reuse the venv from the builder. Both stages use the same Python base.
 COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 . ./
+# Build stamp. Kept after every COPY/RUN: BUILD_TIME changes on every build,
+# and a changed ARG/ENV invalidates every layer after it.
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_SHA=${GIT_SHA} \
+    BUILD_TIME=${BUILD_TIME}
 USER 10001
 EXPOSE 8000
 

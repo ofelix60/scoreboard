@@ -5,7 +5,7 @@ SCALE ?= 2
 	fmt lint
 
 up:
-	docker compose up -d --scale api=$(SCALE)
+	docker compose up -d --build --scale api=$(SCALE)
 
 down:
 	docker compose down
@@ -19,3 +19,5 @@ fmt:
 lint: 
 	uv run ruff check .
 
+export GIT_SHA := $(shell git rev-parse --short HEAD)
+export BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

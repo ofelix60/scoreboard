@@ -24,7 +24,11 @@ services:
 
   api:
     image: scoreboard:latest
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     networks:
       - sb-net
     env_file:
