@@ -38,4 +38,4 @@ HEALTHCHECK --interval=10s --timeout=2s --start-period=10s --retries=3 \
         ip=socket.gethostbyname(socket.gethostname()); \
         urllib.request.urlopen('http://'+ip+':8000/readyz', timeout=1.5).read()"]
 # Explicitly use the venv's Python to run uvicorn.
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0"]
+CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--no-access-log", "--log-config", "/app/logging.json"]

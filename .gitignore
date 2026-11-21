@@ -39,3 +39,4 @@ build/
 scratch.txt
 secret.yaml
 db-secret.yaml
+IMPROVEMENT_PLAN.md

@@ -16,3 +16,5 @@ scratch.txt
 .env
 .mypy_cache
 .vscode
+
+IMPROVEMENT_PLAN.md

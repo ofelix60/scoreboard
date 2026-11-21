@@ -8,6 +8,10 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from logging_setup import initialize_logging
+
+logger = initialize_logging()
+
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
