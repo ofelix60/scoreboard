@@ -1,14 +1,19 @@
+import re
+import secrets
 import socket
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import psycopg
+import structlog
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from logging_setup import initialize_logging
+from logging_setup import initialize_logging, redact_ip
 
 logger = initialize_logging()
 
@@ -52,6 +57,49 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+@app.middleware("http")
+async def request_logger(request: Request, call_next):
+    rid = request.headers.get("x-request-id", "")
+    if not REQUEST_ID_RE.fullmatch(rid):
+        rid = secrets.token_urlsafe(12)
+
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=rid)
+
+    request.state.log_context = {}
+
+    exc: Exception | None = None
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        exc = e
+        response = JSONResponse({"detail": "internal server error"}, status_code=500)
+
+    response.headers["X-Request-ID"] = rid
+    route = request.scope.get("route")
+    log = logger.error if response.status_code >= 500 else logger.info
+    log(
+        "request_served",
+        method=request.method,
+        route=getattr(route, "path", "__unmatched__"),
+        status=response.status_code,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        client_ip=redact_ip(request.client.host)
+        if request.client
+        else None,  # the connection's IP (Caddy)
+        forwarded_for=request.headers.get(
+            "x-forwarded-for"
+        ),  # what Caddy says the visitor was
+        user_agent=request.headers.get("user-agent"),
+        exc_info=exc,
+        **request.state.log_context,
+    )
+    return response
 
 
 def get_connection(request: Request):
