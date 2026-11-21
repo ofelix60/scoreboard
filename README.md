@@ -92,6 +92,9 @@ files in this repo plus the two secrets noted below.
 | `GET /scores/top` | 200 | `?limit=` validated `1..100` |
 | `GET /metrics` | 200 | Prometheus text format; excluded from its own counters |
 
+Every response carries an `X-Request-ID` header, 5xx included. Quote it to find the
+matching log line.
+
 Validation is declared, not hand-written: `pydantic.Field(min_length=1)` / `Field(ge=0)`
 and `Query(10, ge=1, le=100)`. Invalid input returns a 422 naming the offending field,
 with no `if` statements in the handler.
@@ -127,6 +130,52 @@ observing zero active-checker log lines and `[]` from the admin API. Health beca
 passive only. Kubernetes separates these concerns properly: Services do discovery,
 readiness probes do health, independently. That tradeoff is the clearest argument for
 the migration in this repo.
+
+**Logs are JSON on stdout, one line per request.** structlog writes JSON when stdout
+isn't a terminal and a readable console format when it is. Containers log to stdout
+because that's what `docker logs`, and later CloudWatch, reads. A log file inside a
+container is a file nobody reads.
+
+**Context is added by a processor, not a bound logger.** `service`, `env`, `hostname`,
+`git_sha` and `build_time` are added by a processor in structlog's `pre_chain`. A bound
+logger only reaches records that go through it. The processor also reaches uvicorn's
+and psycopg's own records, and those are the ones you need during a bad deploy.
+
+**The middleware owns the request line, not uvicorn.** uvicorn's access log is off
+(`--no-access-log`), because two loggers writing one request line would count every
+request twice. uvicorn's own logging setup is replaced by a no-op `logging.json`.
+Without that, uvicorn attaches its own handlers and its records never reach ours.
+`--log-config /dev/null` doesn't work for this: uvicorn treats any path that isn't
+JSON or YAML as an INI file, and Python 3.12 rejects an empty one.
+
+**Every log line carries the image's git SHA.** `GIT_SHA` and `BUILD_TIME` are passed
+as build args and become `ENV` in the runtime stage, after every `COPY`. `BUILD_TIME`
+changes on every build, and a changed `ARG` or `ENV` invalidates every layer after it.
+Any earlier in the stage, every build would re-copy the venv and the source.
+
+**Request IDs are validated, not trusted.** An inbound `X-Request-ID` is kept only if
+it matches `[A-Za-z0-9_-]{1,64}`. Otherwise a new one is generated. Accepting it
+unchecked would put a client-controlled string of any length on every log line. The
+ID is bound with contextvars, so every log line in the request carries it.
+
+**Sync endpoints pass log context up through `request.state`.** The endpoints are plain
+`def`, so FastAPI runs them in a threadpool. contextvars are copied *into* the worker
+thread but not back out. Anything an endpoint or dependency wants on the request line
+goes in `request.state.log_context`, a dict the middleware reads after the endpoint
+returns.
+
+**Database errors go to the log, not the client.** A 503 body says `Database
+unavailable` and nothing else. The exception, its traceback and `db_host` go on the
+request line, under the same `request_id` as the response header. Before this fix, the
+raw psycopg error text went into the response body. Through the pool that's the
+`PoolTimeout` message. On other failure paths psycopg names the host, port and user.
+
+**Logged tracebacks never include local variables.** Tracebacks are rendered with
+`show_locals=False`. structlog's `dict_tracebacks` shorthand defaults to `True`, which
+put the full DSN, password included, into the log from a stack frame's locals. The
+`redact` processor can't catch that, for two reasons. It runs in `pre_chain`, *before*
+the traceback is rendered. And it only checks top-level keys, while locals are nested
+inside the traceback.
 
 **`scoreboard_db_ready` is set by `/readyz`, not by the scrape.** This coupling is
 deliberate. Querying the database on every `GET /metrics` would make the metrics endpoint
@@ -180,6 +229,12 @@ Known, not hidden. Each has a decided fix.
   Prometheus adds them up. Running `--workers N` inside one container is not fine: the
   workers share one port, so each scrape would show a random worker's numbers. That
   would need `PROMETHEUS_MULTIPROC_DIR` and a `MultiProcessCollector`.
+- **`forwarded_for` is logged exactly as received.** `X-Forwarded-For` can be set by
+  the client, so it isn't trusted as identity. Unlike `client_ip`, it isn't
+  IP-redacted either.
+- **`/readyz` discards the reason for a failure.** Its 503 detail is correctly
+  generic, but the exception isn't logged, so a failing readiness check leaves no
+  record of why. Only the `scoreboard_db_ready` gauge changes.
 - **In production this would be a managed database** (RDS/Cloud SQL), not a hand-rolled
   StatefulSet. Running Postgres in-cluster costs staff time; if it had to be in-cluster
   it should use an operator, not this.
@@ -187,7 +242,11 @@ Known, not hidden. Each has a decided fix.
 ## Layout
 
 ```
-app.py                    FastAPI app, pool lifecycle, endpoints
+app.py                    FastAPI app, pool lifecycle, endpoints, middleware, metrics
+logging_setup.py          structlog config: JSON on stdout, static context, redaction
+logging.json              no-op uvicorn log config, so its records reach ours
+build.py                  reads GIT_SHA / BUILD_TIME from the environment
+sensitive_keys.py         key names the redact processor masks
 schema.sql                table definition
 Dockerfile                multi-stage, digest-pinned, non-root
 docker-compose.yaml       db + api + caddy, health-gated depends_on
@@ -196,7 +255,9 @@ Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
 .env.example              the five variables Compose needs
-.dockerignore             keeps .env and caches out of the build context
+.dockerignore             keeps .env, k8s/ (incl. the real Secret), terraform/ and caches out of the image
+terraform/envs/dev/
+  backend.tf              S3 remote state, native lockfile, default_tags
 k8s/
   kind-cluster.yaml       3-node cluster, extraPortMappings, ingress-ready label
   ingress-nginx.yaml      vendored controller-v1.15.1, nodeSelector patched
