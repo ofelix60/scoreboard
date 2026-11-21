@@ -130,12 +130,17 @@ async def request_logger(request: Request, call_next):
     route_tmpl = getattr(route, "path", "__unmatched__")
     duration = time.perf_counter() - start
 
-    # Metrics: a scrape counting itself would add a fake request every 15s and skew the rate.
+    # Metrics: a scrape counting itself would add a fake request every 5s and skew the rate.
     if route_tmpl != "/metrics":
         HTTP_REQUESTS.labels(
             request.method, route_tmpl, str(response.status_code)
         ).inc()
         HTTP_DURATION.labels(request.method, route_tmpl).observe(duration)
+
+    # Successful scrapes aren't logged. Prometheus records every scrape itself
+    # (up, scrape_duration_seconds). Only a failing /metrics is worth a line here.
+    if route_tmpl == "/metrics" and response.status_code < 500:
+        return response
 
     log = logger.error if response.status_code >= 500 else logger.info
     log(
