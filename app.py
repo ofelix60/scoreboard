@@ -117,7 +117,7 @@ async def request_logger(request: Request, call_next):
     start = time.perf_counter()
     try:
         response = await call_next(request)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - except Exception as e:  # noqa: BLE001 — last-resort request logging with request ID
         exc = e
         response = JSONResponse({"detail": "internal server error"}, status_code=500)
 

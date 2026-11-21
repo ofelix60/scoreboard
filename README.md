@@ -60,6 +60,11 @@ make up
 curl -k https://localhost:8080/readyz
 ```
 
+**Tests** (no database or Docker needed):
+```bash
+uv run pytest -v
+```
+
 **Kubernetes (kind):**
 ```bash
 kind create cluster --config k8s/kind-cluster.yaml
@@ -232,6 +237,12 @@ Known, not hidden. Each has a decided fix.
 - **`forwarded_for` is logged exactly as received.** `X-Forwarded-For` can be set by
   the client, so it isn't trusted as identity. Unlike `client_ip`, it isn't
   IP-redacted either.
+- **The app can't be imported without database settings.** `settings = AppSettings()`
+  and `db_url` run when `app.py` is imported, so the tests set fake `DB_*` variables
+  before importing it (see `tests/conftest.py`). Building settings inside `lifespan` or
+  a function would remove that coupling. There are no integration tests against a real
+  Postgres yet. The four tests cover request ID handling, the 503 body and metric labels
+  without a database.
 - **`/readyz` discards the reason for a failure.** Its 503 detail is correctly
   generic, but the exception isn't logged, so a failing readiness check leaves no
   record of why. Only the `scoreboard_db_ready` gauge changes.
@@ -248,6 +259,9 @@ logging.json              no-op uvicorn log config, so its records reach ours
 build.py                  reads GIT_SHA / BUILD_TIME from the environment
 sensitive_keys.py         key names the redact processor masks
 schema.sql                table definition
+tests/
+  conftest.py             fake DB_* env set before app import; client + fake_db fixtures
+  test_observability.py   request ID echo/replace, 503 body doesn't leak, metric labels
 Dockerfile                multi-stage, digest-pinned, non-root
 docker-compose.yaml       db + api + caddy, health-gated depends_on
 Caddyfile                 reverse proxy, dynamic upstream discovery
