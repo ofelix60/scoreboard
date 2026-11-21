@@ -80,6 +80,10 @@ async def request_logger(request: Request, call_next):
         exc = e
         response = JSONResponse({"detail": "internal server error"}, status_code=500)
 
+    ctx = request.state.log_context
+    # crash path OR what an endpoint/dependency handed us
+    exc = exc or ctx.pop("exc", None)
+
     response.headers["X-Request-ID"] = rid
     route = request.scope.get("route")
     log = logger.error if response.status_code >= 500 else logger.info
@@ -97,7 +101,7 @@ async def request_logger(request: Request, call_next):
         ),  # what Caddy says the visitor was
         user_agent=request.headers.get("user-agent"),
         exc_info=exc,
-        **request.state.log_context,
+        **ctx,
     )
     return response
 
@@ -108,7 +112,11 @@ def get_connection(request: Request):
         with pool.connection() as conn:
             yield conn
     except psycopg.OperationalError as e:
-        raise HTTPException(503, f"Database unavailable:\n{e}")
+        # Log side: hand the real error to the middleware's request line.
+        request.state.log_context["exc"] = e
+        request.state.log_context["db_host"] = settings.DB_HOST
+        # Client side: generic message only.
+        raise HTTPException(503, "Database unavailable") from e
 
 
 Conn = Annotated[psycopg.Connection, Depends(get_connection)]
