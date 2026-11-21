@@ -11,10 +11,12 @@ Dockerfile
 
 bench.sh
 benchmarks.md
-scratch.txt
 
 .env
 .mypy_cache
 .vscode
 
-IMPROVEMENT_PLAN.md
+terraform/ 
+
+scratch/
+k8s/
