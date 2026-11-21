@@ -7,8 +7,15 @@ from typing import Annotated
 
 import psycopg
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +23,40 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from logging_setup import initialize_logging, redact_ip
 
 logger = initialize_logging()
+
+# Latency buckets, in seconds, chosen from measured request durations (see the 1.2 logs):
+# /livez ~0.5ms, /scores/top ~1.4ms, /readyz ~7ms, a pool-timeout 503 ~2s.
+BUCKETS = (
+    0.0005,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+)
+
+HTTP_REQUESTS = Counter(
+    "scoreboard_http_requests_total",
+    "HTTP requests served",
+    ["method", "route", "status"],
+)
+HTTP_DURATION = Histogram(
+    "scoreboard_http_request_duration_seconds",
+    "Time spent handling a request",
+    ["method", "route"],
+    buckets=BUCKETS,
+)
+DB_READY = Gauge(
+    "scoreboard_db_ready",
+    "1 if the last /readyz reached the database, else 0. Updated only when /readyz is called.",
+)
 
 
 class AppSettings(BaseSettings):
@@ -86,13 +127,23 @@ async def request_logger(request: Request, call_next):
 
     response.headers["X-Request-ID"] = rid
     route = request.scope.get("route")
+    route_tmpl = getattr(route, "path", "__unmatched__")
+    duration = time.perf_counter() - start
+
+    # Metrics: a scrape counting itself would add a fake request every 15s and skew the rate.
+    if route_tmpl != "/metrics":
+        HTTP_REQUESTS.labels(
+            request.method, route_tmpl, str(response.status_code)
+        ).inc()
+        HTTP_DURATION.labels(request.method, route_tmpl).observe(duration)
+
     log = logger.error if response.status_code >= 500 else logger.info
     log(
         "request_served",
         method=request.method,
-        route=getattr(route, "path", "__unmatched__"),
+        route=route_tmpl,
         status=response.status_code,
-        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        duration_ms=round(duration * 1000, 2),
         client_ip=redact_ip(request.client.host)
         if request.client
         else None,  # the connection's IP (Caddy)
@@ -135,12 +186,14 @@ def readyz() -> dict:
     try:
         with psycopg.connect(db_url, connect_timeout=1) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1")
+        DB_READY.set(1)
         return {
             "status": "ok",
             "database": "ok",
             "hostname": socket.gethostname(),
         }
     except psycopg.OperationalError:
+        DB_READY.set(0)
         raise HTTPException(
             status_code=503,
             detail="Database unavailable",
@@ -168,3 +221,8 @@ def top_scores(conn: Conn, limit: int = Query(10, ge=1, le=100)) -> list[Score]:
             top_n.append(Score(player=player, score=score))
 
     return top_n
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

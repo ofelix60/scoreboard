@@ -90,6 +90,7 @@ files in this repo plus the two secrets noted below.
 | `GET /readyz` | 200 / 503 | opens its own connection, `connect_timeout=1` |
 | `POST /scores` | 201 | `{"player": str, "score": int}` |
 | `GET /scores/top` | 200 | `?limit=` validated `1..100` |
+| `GET /metrics` | 200 | Prometheus text format; excluded from its own counters |
 
 Validation is declared, not hand-written: `pydantic.Field(min_length=1)` / `Field(ge=0)`
 and `Query(10, ge=1, le=100)`. Invalid input returns a 422 naming the offending field,
@@ -127,6 +128,20 @@ passive only. Kubernetes separates these concerns properly: Services do discover
 readiness probes do health, independently. That tradeoff is the clearest argument for
 the migration in this repo.
 
+**`scoreboard_db_ready` is set by `/readyz`, not by the scrape.** This coupling is
+deliberate. Querying the database on every `GET /metrics` would make the metrics endpoint
+a free way to send load to the database. Instead, whatever already probes readiness on a
+timer keeps the gauge fresh: the compose `HEALTHCHECK` every 10s, the k8s
+`readinessProbe`, and later the ALB health check. Removing those probes silently freezes
+the gauge. See Known gaps.
+
+**Metric labels are bounded by design.** Requests are labelled by the matched route
+template, with unmatched paths collapsed into `__unmatched__`, never by the raw path or
+the request ID. A scanner trying ten thousand URLs produces one series, not ten thousand.
+Histogram buckets come from measured latencies (`/livez` ~0.5ms, `/scores/top` ~1.4ms,
+`/readyz` ~7ms, a pool-timeout 503 ~2s), not the library defaults, which start at 5ms
+and would put almost every request in the first bucket.
+
 **The ingress-nginx manifest is vendored, not applied from a URL.** Pinned to
 `controller-v1.15.1`. Vendoring means the version can't drift and — more importantly —
 the manifest can be patched: the upstream kind provider dropped the `ingress-ready`
@@ -156,6 +171,15 @@ Known, not hidden. Each has a decided fix.
   `maxUnavailable` rounds down to 0, the new pod waits for a volume the old pod won't
   release. It's a StatefulSet, which sidesteps that, but the honest answer for a
   single-instance database is `strategy: Recreate` and accepting the downtime.
+- **`scoreboard_db_ready` goes stale if nothing probes `/readyz`.** It keeps showing
+  the last value it was set to, so it can be out of date but never invented. It reads 0
+  from process start until the first probe. Each replica updates its own gauge on its
+  own healthcheck schedule, so two replicas can briefly disagree.
+- **Metrics assume one worker per container.** Each uvicorn process keeps its own
+  counters in memory. Replicas are fine: each container is a separate scrape target and
+  Prometheus adds them up. Running `--workers N` inside one container is not fine: the
+  workers share one port, so each scrape would show a random worker's numbers. That
+  would need `PROMETHEUS_MULTIPROC_DIR` and a `MultiProcessCollector`.
 - **In production this would be a managed database** (RDS/Cloud SQL), not a hand-rolled
   StatefulSet. Running Postgres in-cluster costs staff time; if it had to be in-cluster
   it should use an operator, not this.
