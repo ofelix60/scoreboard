@@ -231,3 +231,4 @@ def top_scores(conn: Conn, limit: int = Query(10, ge=1, le=100)) -> list[Score]:
 @app.get("/metrics", include_in_schema=False)
 def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+import os
