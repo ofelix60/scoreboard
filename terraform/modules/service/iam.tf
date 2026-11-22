@@ -1,6 +1,6 @@
 
 # --- Instance role ------------------------------------------------------------
-# The app instances can: be reached over SSM, and pull from this module's ECR repository. Nothing else.
+# The app instances can: be reached over SSM, pull from this module's ECR repository, and read this module's database secret. Nothing else.
 
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
@@ -47,4 +47,19 @@ resource "aws_iam_role_policy" "app_ecr_pull" {
 resource "aws_iam_instance_profile" "app" {
   name = "${var.name}-app"
   role = aws_iam_role.app.name
+}
+
+# RDS created this secret. The role can read this one secret and no other.
+# No kms:Decrypt needed: the secret uses the AWS-managed aws/secretsmanager key.
+data "aws_iam_policy_document" "app_db_secret" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_db_instance.this.master_user_secret[0].secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "app_db_secret" {
+  name   = "db-secret"
+  role   = aws_iam_role.app.id
+  policy = data.aws_iam_policy_document.app_db_secret.json
 }

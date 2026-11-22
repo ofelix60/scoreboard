@@ -46,11 +46,15 @@ resource "aws_launch_template" "app" {
   }
 
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
-    region      = data.aws_region.current.region
-    registry    = split("/", aws_ecr_repository.app.repository_url)[0]
-    image       = local.image
-    app_port    = var.app_port
-    environment = var.environment
+    region        = data.aws_region.current.region
+    registry      = split("/", aws_ecr_repository.app.repository_url)[0]
+    image         = local.image
+    app_port      = var.app_port
+    environment   = var.environment
+    db_host       = aws_db_instance.this.address
+    db_port       = aws_db_instance.this.port
+    db_name       = aws_db_instance.this.db_name
+    db_secret_arn = aws_db_instance.this.master_user_secret[0].secret_arn
   }))
 
   # default_tags don't reach instances an ASG launches; tag them explicitly.
@@ -96,6 +100,10 @@ resource "aws_autoscaling_group" "app" {
       max_healthy_percentage = 200
     }
   }
+  # New instances read the DB secret at boot. Nothing in the launch template
+  # references this policy, so without this the refresh can start before the
+  # permission exists.
+  depends_on = [aws_iam_role_policy.app_db_secret]
 }
 
 # The ASG won't replace a wedged-but-running instance (EC2 health checks).
