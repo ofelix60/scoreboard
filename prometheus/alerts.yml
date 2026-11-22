@@ -1,0 +1,19 @@
+groups:
+  - name: scoreboard
+    rules:
+      - alert: ScoreboardHighErrorRate
+        expr: |
+          (
+            sum(rate(scoreboard_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(scoreboard_http_requests_total[5m]))
+          ) > 0.05
+          and
+          sum(rate(scoreboard_http_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "5xx ratio above 5% for 5 minutes"
+          description: "{{ $value | humanizePercentage }} of requests are failing."
+          runbook_url: "https://github.com/ofelix60/scoreboard/blob/main/docs/runbook.md#scoreboardhigherrorrate"

@@ -1,0 +1,38 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: fires after 5 minutes of mostly-5xx traffic
+    input_series:
+      - series: 'scoreboard_http_requests_total{method="GET",route="/scores/top",status="500"}'
+        values: "0+30x15"
+      - series: 'scoreboard_http_requests_total{method="GET",route="/scores/top",status="200"}'
+        values: "0+1x15"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ScoreboardHighErrorRate
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ScoreboardHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "5xx ratio above 5% for 5 minutes"
+              description: "96.77% of requests are failing."
+              runbook_url: "https://github.com/ofelix60/scoreboard/blob/main/docs/runbook.md#scoreboardhigherrorrate"
+
+  - interval: 1m
+    name: stays quiet on a low-traffic service with occasional failures
+    input_series:
+      - series: 'scoreboard_http_requests_total{method="GET",route="/scores/top",status="500"}'
+        values: "0 0 0 1 1 1 2 2 2 3 3 3 4 4 4 5"
+      - series: 'scoreboard_http_requests_total{method="GET",route="/scores/top",status="200"}'
+        values: "0+2x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ScoreboardHighErrorRate
+        exp_alerts: []
