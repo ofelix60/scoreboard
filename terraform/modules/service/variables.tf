@@ -56,3 +56,9 @@ variable "desired_capacity" {
   type    = number
   default = 1
 }
+
+variable "db_instance_class" {
+  description = "RDS instance class."
+  type        = string
+  default     = "db.t4g.micro"
+}
