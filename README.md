@@ -72,6 +72,12 @@ Then open:
 uv run pytest -v
 ```
 
+**Alert rule tests** (`promtool`, from the Prometheus image):
+```bash
+docker run --rm -v "$PWD/prometheus:/p" -w /p --entrypoint promtool \
+  prom/prometheus:v3.7.3 test rules alerts_test.yml
+```
+
 **Kubernetes (kind):**
 ```bash
 kind create cluster --config k8s/kind-cluster.yaml
@@ -251,6 +257,18 @@ never reach the app, so the app couldn't log them anyway. Prometheus records the
 in `up` and `scrape_duration_seconds`. A `/metrics` response of 500 or above is still
 logged.
 
+**The error-rate alert needs both a ratio and enough traffic.**
+`ScoreboardHighErrorRate` fires when more than 5% of requests are 5xx for 5 minutes,
+*and* traffic is above 0.1 req/s. Without the traffic condition, one failed request on
+an idle service is a 100% error rate. The rule has `promtool` unit tests, and each test
+was checked by breaking the rule on purpose. Deleting the traffic condition fails the
+"stays quiet on a low-traffic service" test. Setting `for: 0m` fails the "fires after
+5 minutes" test at minute 3. The test the plan originally suggested for the traffic
+condition (a single failed request) passed even with the condition deleted: `for: 5m`
+alone kept it quiet. Measured against a real database outage, the alert went pending
+after 2m52s and fired after **7m52s**. What to do when it fires is in
+**[docs/runbook.md](docs/runbook.md)**.
+
 **Prometheus and Grafana listen on 127.0.0.1 only, and Grafana allows anonymous
 viewing.** Prometheus has no authentication at all. Anonymous Viewer is a deliberate
 choice, so the dashboard opens without a login for a demo or a screenshot. Both choices
@@ -320,8 +338,20 @@ Known, not hidden. Each has a decided fix.
   answered requests itself, including `/livez`, which doesn't use the database. Those
   requests never reached the middleware. Healthy requests disappeared from the count
   along with failing ones, so the error ratio peaked at about 97%, higher than what
-  clients actually saw. Fix: scrape Caddy's own metrics as well, and on AWS use the load
-  balancer's request metrics.
+  clients actually saw. It also slows the alert down. During an outage only about 0.3
+  req/s of errors reach the app, instead of the ~8 req/s the clients are sending, so
+  the 5-minute ratio takes about 3 minutes to pass 5% instead of about 15 seconds. Fix:
+  scrape Caddy's own metrics as well, and on AWS use the load balancer's request
+  metrics.
+- **A firing alert notifies nobody.** There's no Alertmanager, so the alert only shows
+  up at http://localhost:9090/alerts. Routing it to a pager or a chat channel is
+  Alertmanager's job.
+- **The alert misses short outages and outages on a quiet service.** A measured 1m55s
+  database outage peaked at a 2.5% error ratio and never fired. Below 0.1 req/s, the
+  traffic condition blocks the alert even if every request fails. Docker's `/readyz`
+  healthchecks (0.2 req/s) count as traffic, so during a database outage they're what
+  keeps the alert able to fire. They're also most of the "failing requests". A separate
+  `scoreboard_db_ready == 0` alert would cover "broken while quiet".
 - **Every `make up` restarts the api containers**, even when every build step is
   `CACHED`. `BUILD_TIME` is new on every run, so the image's `ENV` changes and so does its
   ID. Using the last commit's timestamp would make the image change only when the code
@@ -346,13 +376,16 @@ Dockerfile                multi-stage, digest-pinned, non-root
 docker-compose.yaml       db + api + caddy + prometheus + grafana, health-gated depends_on
 Caddyfile                 reverse proxy, dynamic upstream discovery
 prometheus/
-  prometheus.yml          5s scrape, DNS discovery of each api replica
+  prometheus.yml          5s scrape, DNS discovery of each api replica, loads alerts.yml
+  alerts.yml              ScoreboardHighErrorRate: 5xx ratio > 5% for 5m, with a traffic guard
+  alerts_test.yml         promtool unit tests: fires under failure, quiet on a low-traffic service
 grafana/provisioning/
   datasources/prometheus.yml   Prometheus datasource, fixed uid
   dashboards/dashboards.yml    loads every .json in this folder
   dashboards/scoreboard.json   the RED dashboard, exported from the UI
 docs/
   grafana-red-db-outage.png    the dashboard during a database outage
+  runbook.md                   what to do when each alert fires
 Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
