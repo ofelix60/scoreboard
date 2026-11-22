@@ -60,6 +60,13 @@ make up
 curl -k https://localhost:8080/readyz
 ```
 
+Then open:
+
+- **Grafana** at http://localhost:3000. The `Scoreboard RED` dashboard is already there,
+  with no login needed to view it.
+- **Prometheus** at http://localhost:9090/targets. It should list **two** `scoreboard`
+  targets, one per api replica.
+
 **Tests** (no database or Docker needed):
 ```bash
 uv run pytest -v
@@ -103,6 +110,27 @@ matching log line.
 Validation is declared, not hand-written: `pydantic.Field(min_length=1)` / `Field(ge=0)`
 and `Query(10, ge=1, le=100)`. Invalid input returns a 422 naming the offending field,
 with no `if` statements in the handler.
+
+## Dashboard
+
+![Scoreboard RED dashboard during a database outage](docs/grafana-red-db-outage.png)
+
+Three panels, one for each RED question: **R**ate (requests per second by route),
+**E**rrors (the share of responses that are 5xx), **D**uration (p95 latency by route).
+The screenshot shows the database stopped for a few minutes under steady traffic.
+The error ratio climbs, `/scores/top` p95 rises to the 2s pool timeout, and both
+recover once the database is back. The earlier dip at about 15:52 is the api containers
+restarting during a `make up`, not part of the outage (see Known gaps).
+
+```promql
+sum by (route) (rate(scoreboard_http_requests_total[1m]))
+
+(sum(rate(scoreboard_http_requests_total{status=~"5.."}[5m])) or vector(0))
+  / sum(rate(scoreboard_http_requests_total[5m]))
+
+histogram_quantile(0.95,
+  sum by (le, route) (rate(scoreboard_http_request_duration_seconds_bucket[5m])))
+```
 
 ## Design decisions and tradeoffs
 
@@ -196,6 +224,39 @@ Histogram buckets come from measured latencies (`/livez` ~0.5ms, `/scores/top` ~
 `/readyz` ~7ms, a pool-timeout 503 ~2s), not the library defaults, which start at 5ms
 and would put almost every request in the first bucket.
 
+**Prometheus finds the replicas through DNS, not a fixed address.** `make up` runs two
+api containers behind one name. A static `api:8000` target goes through Docker's
+round-robin DNS, so each scrape hits a different replica. Both counters end up in one
+series, and every switch looks like a counter reset to `rate()`. `dns_sd_configs` looks
+up all of `api`'s A records instead and scrapes each container as its own target, with
+its own `instance` label. Caddy's `dynamic a` block uses the same mechanism to route
+traffic. When containers are replaced, both pick up the new addresses within 5s.
+
+**The dashboard is a file in the repo, not something clicked together in the UI.**
+Grafana loads the datasource and `scoreboard.json` from `grafana/provisioning/` on
+startup. A dashboard saved in the UI lives in the container's internal database and is
+gone when the container is removed. To change it, edit it in the UI, copy the JSON, and
+replace the file. Grafana won't save over a provisioned dashboard. The datasource has a
+fixed `uid: prometheus`, because the exported JSON refers to the datasource by uid.
+Without it, Grafana makes up a new random uid on every fresh start, and every panel
+reports "datasource not found".
+
+**The error panel reads 0%, not "No data", when nothing is failing.** No 5xx series
+exists until the first 5xx happens, and dividing an empty result gives an empty result.
+`or vector(0)` substitutes 0 for the missing top half of the ratio.
+
+**Successful scrapes aren't logged.** Two replicas scraped every 5s produced 24 request
+lines a minute that buried real traffic. Most scrape failures (container down, network)
+never reach the app, so the app couldn't log them anyway. Prometheus records them itself,
+in `up` and `scrape_duration_seconds`. A `/metrics` response of 500 or above is still
+logged.
+
+**Prometheus and Grafana listen on 127.0.0.1 only, and Grafana allows anonymous
+viewing.** Prometheus has no authentication at all. Anonymous Viewer is a deliberate
+choice, so the dashboard opens without a login for a demo or a screenshot. Both choices
+are only safe because the ports aren't reachable from the network. Editing needs the
+admin login (`GRAFANA_PASSWORD`, default `admin`).
+
 **The ingress-nginx manifest is vendored, not applied from a URL.** Pinned to
 `controller-v1.15.1`. Vendoring means the version can't drift and — more importantly —
 the manifest can be patched: the upstream kind provider dropped the `ingress-ready`
@@ -246,6 +307,25 @@ Known, not hidden. Each has a decided fix.
 - **`/readyz` discards the reason for a failure.** Its 503 detail is correctly
   generic, but the exception isn't logged, so a failing readiness check leaves no
   record of why. Only the `scoreboard_db_ready` gauge changes.
+- **p95 latency is an estimate, and it can be well off.** `histogram_quantile` only
+  knows which bucket a request fell in, and it assumes requests are spread evenly
+  inside that bucket. Measured: `/livez` p95 read **2.2ms** on the dashboard, but the
+  exact `duration_ms` values from the logs for the same 5 minutes gave **1.3ms**. Most
+  requests were just over 1ms, inside a 1ms–2.5ms bucket. Pool-timeout requests at
+  about 2.0s showed as about 2.4s for the same reason. The fix is an extra bucket at
+  `0.0015`. Every bucket adds a series for each method, route and instance, so it
+  hasn't been added yet.
+- **The app only measures requests that reach it.** During the outage in the screenshot,
+  Caddy's passive health check (`unhealthy_status 5xx`) marked *both* replicas down and
+  answered requests itself, including `/livez`, which doesn't use the database. Those
+  requests never reached the middleware. Healthy requests disappeared from the count
+  along with failing ones, so the error ratio peaked at about 97%, higher than what
+  clients actually saw. Fix: scrape Caddy's own metrics as well, and on AWS use the load
+  balancer's request metrics.
+- **Every `make up` restarts the api containers**, even when every build step is
+  `CACHED`. `BUILD_TIME` is new on every run, so the image's `ENV` changes and so does its
+  ID. Using the last commit's timestamp would make the image change only when the code
+  does.
 - **In production this would be a managed database** (RDS/Cloud SQL), not a hand-rolled
   StatefulSet. Running Postgres in-cluster costs staff time; if it had to be in-cluster
   it should use an operator, not this.
@@ -263,13 +343,21 @@ tests/
   conftest.py             fake DB_* env set before app import; client + fake_db fixtures
   test_observability.py   request ID echo/replace, 503 body doesn't leak, metric labels
 Dockerfile                multi-stage, digest-pinned, non-root
-docker-compose.yaml       db + api + caddy, health-gated depends_on
+docker-compose.yaml       db + api + caddy + prometheus + grafana, health-gated depends_on
 Caddyfile                 reverse proxy, dynamic upstream discovery
+prometheus/
+  prometheus.yml          5s scrape, DNS discovery of each api replica
+grafana/provisioning/
+  datasources/prometheus.yml   Prometheus datasource, fixed uid
+  dashboards/dashboards.yml    loads every .json in this folder
+  dashboards/scoreboard.json   the RED dashboard, exported from the UI
+docs/
+  grafana-red-db-outage.png    the dashboard during a database outage
 Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
 .env.example              the five variables Compose needs
-.dockerignore             keeps .env, k8s/ (incl. the real Secret), terraform/ and caches out of the image
+.dockerignore             keeps .env, k8s/ (incl. the real Secret), terraform/, monitoring config and caches out of the image
 terraform/envs/dev/
   backend.tf              S3 remote state, native lockfile, default_tags
 k8s/
