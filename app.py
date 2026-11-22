@@ -21,7 +21,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from logging_setup import initialize_logging, redact_ip
+from logging_setup import initialize_logging, redact_forwarded_for, redact_ip
 
 logger = initialize_logging()
 
@@ -162,10 +162,8 @@ async def request_logger(request: Request, call_next):
         duration_ms=round(duration * 1000, 2),
         client_ip=redact_ip(request.client.host)
         if request.client
-        else None,  # the connection's IP (Caddy)
-        forwarded_for=request.headers.get(
-            "x-forwarded-for"
-        ),  # what Caddy says the visitor was
+        else None,  # the connection's IP (proxy: Caddy or the ALB)
+        forwarded_for=redact_forwarded_for(request.headers.get("x-forwareded-for")),
         user_agent=request.headers.get("user-agent"),
         exc_info=exc,
         **ctx,

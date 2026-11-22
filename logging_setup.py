@@ -51,6 +51,12 @@ def redact_ip(addr: str) -> str:
     return str(net.network_address)
 
 
+def redact_forwarded_for(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return ", ".join(redact_ip(hop.strip()) for hop in value.split(","))
+
+
 def safe_dsn(dsn: str) -> str:
     try:
         parts = urlsplit(dsn)
