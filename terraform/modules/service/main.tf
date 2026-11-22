@@ -15,6 +15,18 @@ resource "aws_vpc" "this" {
   tags = { Name = var.name }
 }
 
+# Every VPC comes with a "default" security group that lets its members reach
+# each other on every port. Nothing here uses it, but anything launched into
+# the VPC without an explicit SG lands in it. This resource takes it over and,
+# with no rules listed, removes them all. (Security Hub EC2.2)
+resource "aws_default_security_group" "this" {
+  vpc_id = aws_vpc.this.id
+
+  ingress = []
+  egress  = []
+  tags    = { Name = "${var.name}-default-unused" }
+}
+
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
   tags   = { Name = var.name }
