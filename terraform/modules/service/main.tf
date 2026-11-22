@@ -160,3 +160,40 @@ resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
   from_port                    = 5432
   to_port                      = 5432
 }
+
+# --- Container registry ------------------------------------------------------
+# Instances pull with their instance role (2.3), so no registry token is
+# stored anywhere. Tags are git SHAs and immutable: a tag always means the
+# same bytes, so the git_sha on a log line names exactly one image.
+
+resource "aws_ecr_repository" "app" {
+  name                 = var.name
+  image_tag_mutability = "IMMUTABLE"
+
+  # This environment is meant to be destroyed. In production the registry
+  # would outlive any one environment and this would be false.
+  force_delete = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = { Name = var.name }
+}
+
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep the 10 most recent images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
