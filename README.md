@@ -1,5 +1,7 @@
 # scoreboard
 
+[![ci](https://github.com/ofelix60/scoreboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ofelix60/scoreboard/actions/workflows/ci.yml)
+
 A small FastAPI + Postgres service, deliberately deployed four different ways:
 `docker run` → Compose → Kubernetes → (next) AWS ECS.
 
@@ -299,7 +301,10 @@ Known, not hidden. Each has a decided fix.
   come from CI or an external secret store.
 - **Nine raw manifests, no templating.** Fine for one environment, wrong for two.
   Helm or Kustomize.
-- **No CI.** The image is built and pushed by hand.
+- **CI builds the image but doesn't publish it.** Every PR runs lint, type checks,
+  tests, the `promtool` checks and a full image build. Pushing to GHCR is still done by
+  hand. Publishing from CI needs registry credentials, and a pull request from a fork
+  must never be able to reach them.
 - **A single-replica database as a `Deployment` would deadlock** — RWO volume,
   `maxUnavailable` rounds down to 0, the new pod waits for a volume the old pod won't
   release. It's a StatefulSet, which sidesteps that, but the honest answer for a
@@ -390,6 +395,7 @@ Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
 .env.example              the five variables Compose needs
+.github/workflows/ci.yml  lint, typecheck, test, promtool, image build on every PR and on main
 .dockerignore             keeps .env, k8s/ (incl. the real Secret), terraform/, monitoring config and caches out of the image
 terraform/envs/dev/
   backend.tf              S3 remote state, native lockfile, default_tags
