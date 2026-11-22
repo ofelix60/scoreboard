@@ -16,6 +16,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -78,13 +79,23 @@ class Score(BaseModel):
     score: int = Field(ge=0)
 
 
-db_url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+def build_conninfo(s: AppSettings) -> str:
+    return make_conninfo(
+        host=s.DB_HOST,
+        port=s.DB_PORT,
+        user=s.DB_USER,
+        password=s.DB_PASSWORD,
+        dbname=s.DB_NAME,
+    )
+
+
+db_conninfo = build_conninfo(settings)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = ConnectionPool(
-        conninfo=db_url,
+        conninfo=db_conninfo,
         min_size=2,
         max_size=10,
         open=False,
@@ -189,7 +200,10 @@ def livez() -> dict:
 @app.get("/readyz")
 def readyz() -> dict:
     try:
-        with psycopg.connect(db_url, connect_timeout=1) as conn, conn.cursor() as cur:
+        with (
+            psycopg.connect(db_conninfo, connect_timeout=1) as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute("SELECT 1")
         DB_READY.set(1)
         return {
