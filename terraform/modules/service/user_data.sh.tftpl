@@ -1,0 +1,24 @@
+#!/bin/bash
+# Runs once, as root, on first boot. Output: /var/log/cloud-init-output.log
+set -euo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+
+# The instance role can take a few seconds to become usable after boot.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if aws ecr get-login-password --region ${region} \
+       | docker login --username AWS --password-stdin ${registry} \
+     && docker pull ${image}; then
+    break
+  fi
+  echo "ECR login/pull failed (attempt $attempt), retrying in 6s"
+  sleep 6
+done
+
+docker run -d --name scoreboard --restart unless-stopped \
+  -p ${app_port}:8000 \
+  -e ENV=${environment} \
+  -e DB_HOST=127.0.0.1 -e DB_PORT=5432 \
+  -e DB_USER=scoreboard -e DB_PASSWORD=placeholder -e DB_NAME=scoreboard \
+  ${image}
