@@ -3,7 +3,7 @@ module "service" {
 
   name        = "scoreboard-dev"
   environment = "dev"
-  image_tag   = "1349a75"
+  image_tag = "fb5b573"
 }
 
 output "service" {
