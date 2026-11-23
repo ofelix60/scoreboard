@@ -9,7 +9,14 @@
 # root.
 
 locals {
-  github_repo = "ofelix60/scoreboard"
+  # This repository's tokens use GitHub's immutable subject format, which adds
+  # the owner's and the repository's numeric IDs:
+  #   repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>
+  # (gh api repos/ofelix60/scoreboard/actions/oidc/customization/sub)
+  # Names can be reused after a rename or deletion; IDs can't. This repo was
+  # itself recreated under a reused name, so a names-only policy for the old
+  # one would have trusted this one too.
+  github_repo_sub = "repo:ofelix60@68672681/scoreboard@1467130536"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -41,7 +48,7 @@ data "aws_iam_policy_document" "gha_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.github_repo}:ref:refs/heads/main"]
+      values   = ["${local.github_repo_sub}:ref:refs/heads/main"]
     }
   }
 }
