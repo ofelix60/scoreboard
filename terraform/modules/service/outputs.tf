@@ -30,3 +30,7 @@ output "alb_dns_name" {
 output "db_address" {
   value = aws_db_instance.this.address
 }
+
+output "ecr_repository_arn" {
+  value = aws_ecr_repository.app.arn
+}

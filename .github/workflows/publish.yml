@@ -1,0 +1,66 @@
+name: publish
+
+# Builds image for every commit on main and pushes it to ECR as :<short sha>.
+# Deploying stays a reviewed `terraform apply` (image_tag in terraform/envs/dev):
+# CI publishes artifacts, a person reads the plan.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # lets this run ask GitHub for an OIDC token to show AWS
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # Native arm64, the same architecture as the t4g instances: no emulation.
+    runs-on: ubuntu-24.04-arm
+    env:
+      AWS_REGION: us-east-2
+      ECR_REPOSITORY: scoreboard-dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Trades this run's OIDC token for 1-hour credentials. AWS accepts it only
+      # if the token says repo ofelix60/scoreboard, branch main (the role's trust
+      # policy, terraform/envs/dev/github.tf). The role ARN is not a secret.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::748076390329:role/scoreboard-dev-gha-publish
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure the AWS CLI
+        run: |
+          if ! command -v aws >/dev/null; then
+            curl -sSfL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscli.zip
+            unzip -q /tmp/awscli.zip -d /tmp
+            sudo /tmp/aws/install
+          fi
+          aws --version
+
+      # Tags are immutable, so a re-run of the same commit would fail on push.
+      - name: Build and push (skipped if this commit's image already exists)
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA::7}"
+          registry="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+          image="${registry}/${ECR_REPOSITORY}:${sha}"
+
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="$sha" >/dev/null 2>&1; then
+            echo "already in ECR: $image" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          docker build --platform linux/arm64 --provenance=false --sbom=false \
+            --build-arg GIT_SHA="$sha" \
+            --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "$image" .
+          docker push "$image"
+          echo "pushed: $image" | tee -a "$GITHUB_STEP_SUMMARY"
