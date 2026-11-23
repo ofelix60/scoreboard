@@ -62,3 +62,9 @@ variable "db_instance_class" {
   type        = string
   default     = "db.t4g.micro"
 }
+
+variable "log_retention_days" {
+  description = "Days to keep app logs in CloudWatch."
+  type        = number
+  default     = 7
+}

@@ -1,6 +1,8 @@
 
 # --- Instance role ------------------------------------------------------------
-# The app instances can: be reached over SSM, pull from this module's ECR repository, and read this module's database secret. Nothing else.
+# The app instances can: be reached over SSM, pull from this module's ECR
+# repository, read this module's database secret, and write to this
+# module's log group. Nothing else.
 
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
@@ -62,4 +64,19 @@ resource "aws_iam_role_policy" "app_db_secret" {
   name   = "db-secret"
   role   = aws_iam_role.app.id
   policy = data.aws_iam_policy_document.app_db_secret.json
+}
+
+# Write to this module's log group only. Terraform creates the group, so no
+# logs:CreateLogGroup. Streams live inside the group, hence the ":*".
+data "aws_iam_policy_document" "app_logs" {
+  statement {
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.app.arn}:*"]
+  }
+}
+
+resource "aws_iam_role_policy" "app_logs" {
+  name   = "logs"
+  role   = aws_iam_role.app.id
+  policy = data.aws_iam_policy_document.app_logs.json
 }
