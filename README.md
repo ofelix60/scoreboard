@@ -255,6 +255,7 @@ docs/
   postmortem-db-outage.md      the induced RDS outage: timeline, MTTD, what to change
   runbook.md                   what to do when each alert fires
   grafana-red-db-outage.png    the dashboard during a database outage
+  evidence/                    captioned screenshots of the running systems
 Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
