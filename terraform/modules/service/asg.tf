@@ -8,7 +8,8 @@ data "aws_ssm_parameter" "al2023_arm64" {
 }
 
 locals {
-  image = "${aws_ecr_repository.app.repository_url}:${var.image_tag}"
+  image            = "${aws_ecr_repository.app.repository_url}:${var.image_tag}"
+  launch_hook_name = "wait-for-readyz"
 }
 
 resource "aws_launch_template" "app" {
@@ -56,6 +57,8 @@ resource "aws_launch_template" "app" {
     db_name       = aws_db_instance.this.db_name
     db_secret_arn = aws_db_instance.this.master_user_secret[0].secret_arn
     log_group     = aws_cloudwatch_log_group.app.name
+    asg_name      = var.name
+    hook_name     = local.launch_hook_name
   }))
 
   # default_tags don't reach instances an ASG launches; tag them explicitly.
@@ -101,10 +104,26 @@ resource "aws_autoscaling_group" "app" {
       max_healthy_percentage = 200
     }
   }
-  # New instances read the DB secret and start the log driver at boot, and
-  # either failing stops the container. Nothing in the launch template
-  # references these policies, so without this the refresh can start first.
-  depends_on = [aws_iam_role_policy.app_db_secret, aws_iam_role_policy.app_logs]
+  # New instances read the DB secret, start the log driver, and complete their lifecycle action at boot.
+  depends_on = [
+    aws_iam_role_policy.app_db_secret,
+    aws_iam_role_policy.app_logs,
+    aws_iam_role_policy.app_lifecycle,
+  ]
+}
+
+# A new instance waits in Pending:Wait (not in the target group, not counted
+# by an instance refresh) until user_data reports that /readyz passed. So a
+# deploy never terminates the old instance before the new app can serve, and
+# a deploy that never gets ready is abandoned while the old one keeps serving.
+# Separate resource, not initial_lifecycle_hook: that block only applies when
+# the ASG is first created.
+resource "aws_autoscaling_lifecycle_hook" "launch" {
+  name                   = local.launch_hook_name
+  autoscaling_group_name = aws_autoscaling_group.app.name
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_LAUNCHING"
+  heartbeat_timeout      = 600 # boot takes ~5.5 min; ABANDON if nothing reports by 10
+  default_result         = "ABANDON"
 }
 
 # The ASG won't replace a wedged-but-running instance (EC2 health checks).

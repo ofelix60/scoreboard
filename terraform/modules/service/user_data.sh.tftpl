@@ -5,6 +5,10 @@ set -euo pipefail
 dnf install -y docker jq
 systemctl enable --now docker
 
+# Shell access is SSM only, and the security group already blocks port 22.
+# Stopping sshd too means it isn't listening even if a rule is ever added.
+systemctl disable --now sshd
+
 # The instance role can take a few seconds to become usable after boot.
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if aws ecr get-login-password --region ${region} \
@@ -56,3 +60,26 @@ docker run -d --name scoreboard --restart unless-stopped \
   ${image}
 
 rm -f /run/scoreboard.env
+
+# Report to the ASG. Until this runs, the instance waits in Pending:Wait: out
+# of the target group, and an instance refresh won't terminate the old one.
+# /readyz, not /livez: it proves the image, the secret and the database path.
+result=ABANDON
+for attempt in $(seq 1 60); do
+  if curl -sf -o /dev/null http://localhost:${app_port}/readyz; then
+    result=CONTINUE
+    break
+  fi
+  sleep 5
+done
+echo "lifecycle: $result after $attempt checks"
+
+# Fails harmlessly if this instance launched without the hook (e.g. the
+# ASG's very first instances, created before the hook existed).
+aws autoscaling complete-lifecycle-action --region ${region} \
+  --auto-scaling-group-name ${asg_name} \
+  --lifecycle-hook-name ${hook_name} \
+  --instance-id "$instance_id" \
+  --lifecycle-action-result "$result" \
+  || echo "no lifecycle action to complete"
+  
