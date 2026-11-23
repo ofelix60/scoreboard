@@ -3,7 +3,7 @@
 [![ci](https://github.com/ofelix60/scoreboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ofelix60/scoreboard/actions/workflows/ci.yml)
 
 A small FastAPI + Postgres service, deliberately deployed four different ways:
-`docker run` → Compose → Kubernetes → (next) AWS ECS.
+`docker run` → Compose → Kubernetes → AWS (EC2, ALB and RDS, with Terraform).
 
 The service itself is intentionally boring. The point of this repo is **what changes and
 what doesn't when the platform changes** — service discovery, health checking,
@@ -15,18 +15,18 @@ one solves them differently.
 Every platform has an answer to the same eight problems. Learning the fourth platform is
 mostly learning new names for things you already understand:
 
-| Problem | Docker / Compose | Kubernetes | ECS (next) |
+| Problem | Docker / Compose | Kubernetes | AWS (EC2 + ALB + RDS) |
 |---|---|---|---|
-| health checking | `HEALTHCHECK`, Caddy `health_uri` | `livenessProbe` / `readinessProbe` | container health check |
-| load balancing | Caddy `round_robin` over 2 replicas | Service + Deployment replicas | ALB target group |
-| removing sick instances | Caddy passive health | endpoint drops out of the EndpointSlice | target deregistration |
-| service discovery | bridge network, DNS by container name | cluster DNS + Service names | Cloud Map |
-| configuration | `.env` + `--env-file` | ConfigMap | task def environment |
-| secrets | `.env`, gitignored | Secret | task def secrets / Secrets Manager |
-| persistence | named volume | PersistentVolumeClaim | EFS volume |
-| resource limits | `--memory` | `resources.requests/limits` | task/container memory |
+| health checking | `HEALTHCHECK`, Caddy `health_uri` | `livenessProbe` / `readinessProbe` | target group checks `/readyz`; ASG checks the VM |
+| load balancing | Caddy `round_robin` over 2 replicas | Service + Deployment replicas | ALB → target group |
+| removing sick instances | Caddy passive health | endpoint drops out of the EndpointSlice | target marked unhealthy, ALB stops routing to it |
+| service discovery | bridge network, DNS by container name | cluster DNS + Service names | ALB and RDS DNS names, passed in by Terraform |
+| configuration | `.env` + `--env-file` | ConfigMap | Terraform → user_data → `--env-file` |
+| secrets | `.env`, gitignored | Secret | RDS-generated, in Secrets Manager, read at boot |
+| persistence | named volume | PersistentVolumeClaim | RDS (encrypted gp3, daily backups) |
+| resource limits | `--memory` | `resources.requests/limits` | the instance size (t4g.micro) |
 
-Two findings worth more than the table:
+Three findings worth more than the table:
 
 **Kubernetes ignores `HEALTHCHECK` entirely.** A Dockerfile healthcheck is invisible to
 the kubelet. The same logic has to be re-declared as probes.
@@ -36,6 +36,27 @@ the kubelet. The same logic has to be re-declared as probes.
 dependency check means a database blip restarts every replica simultaneously — turning
 a degraded service into no service at all. I tested this on purpose and watched the
 CrashLoopBackOff.
+
+**"Deploy successful" can mean "serving errors".** On AWS, an instance refresh reported
+`Successful` while the load balancer returned 106 502s: the new VM was running, so EC2
+counted it healthy, but the app in it hadn't started. A platform's idea of healthy is
+whatever it checks. Now a new instance can't take traffic until `/readyz` passes
+(see [docs/aws.md](docs/aws.md)).
+
+## Measured
+
+| What | Result | Proof |
+|---|---|---|
+| Image size | 338MB → **66.6MB** | [design decisions](docs/design-decisions.md#the-image) |
+| Empty kind cluster → serving | **2m05s** | [Run it](#run-it) |
+| 502s during a deploy, before → after the readiness hook | **106 → 0**, on 3 deploys since | [AWS](docs/aws.md#a-deploy-waits-for-readyz-not-for-the-vm) |
+| Database outage on AWS: detect / fix / total | **7m38s / 1m56s / 10m18s** | [postmortem](docs/postmortem-db-outage.md) |
+| Database outage locally: until the Prometheus alert fires | **7m52s** | [runbook](docs/runbook.md) |
+| AWS keys stored in CI | **0** (OIDC; another branch gets `AccessDenied`) | [AWS](docs/aws.md#ci-publishes-images-with-no-stored-aws-keys) |
+| Database password in Terraform state or git | **never** | [AWS](docs/aws.md#the-database-password-has-never-been-in-terraform-or-in-git) |
+| Inbound port 22 | **closed everywhere**; shell is SSM only | [AWS](docs/aws.md#no-port-22-anywhere) |
+| Drift between Terraform and AWS | **none**, across 52 resources | [AWS](docs/aws.md) |
+| AWS cost | **$1.12** for the stack's first day | [AWS](docs/aws.md#cost) |
 
 ## Architecture (Kubernetes)
 
@@ -52,6 +73,27 @@ Mac :80 ──► kind extraPortMappings ──► kind-control-plane
 
 Under Compose the same service runs behind Caddy with health-gated `depends_on`. Both
 stacks are in the repo and both work.
+
+## Architecture (AWS)
+
+```
+client ──► ALB :80 (public subnets, 2 AZs)
+             │  target group: GET /readyz every 10s
+             └─► Auto Scaling group: 1 × t4g.micro, Amazon Linux 2023, arm64
+                   │  user_data: pull the image from ECR, read the DB secret,
+                   │  docker run with logs to CloudWatch
+                   │  lifecycle hook: in service only once /readyz returns 200
+                   ├─► RDS Postgres 16, db.t4g.micro (private subnets)
+                   │     password generated by RDS, kept in Secrets Manager
+                   └─► CloudWatch Logs /scoreboard-dev/app (7 days)
+
+security groups   internet → alb :80 → app :8000 → db :5432
+shell access      SSM Session Manager (no port 22, no key pair)
+images            GitHub Actions ──OIDC──► ECR (build and push only)
+```
+
+One Terraform module (`terraform/modules/service`), called by one environment
+(`terraform/envs/dev`). How each piece works and why: **[docs/aws.md](docs/aws.md)**.
 
 ## Run it
 
@@ -102,6 +144,21 @@ curl http://scoreboard.127.0.0.1.nip.io/scores/top
 Measured: **2 minutes 5 seconds from an empty cluster to a serving stack**, using only
 files in this repo plus the two secrets noted below.
 
+**AWS (Terraform):**
+```bash
+cd terraform/envs/dev
+terraform init            # state bucket: see backend.tf
+terraform plan            # read it
+terraform apply           # most of the time is RDS
+curl "$(terraform output -raw url)/readyz"
+```
+
+Every push to `main` publishes the image to ECR, tagged with its short commit SHA. To
+deploy one, set `image_tag` in `terraform/envs/dev/main.tf` and apply. An instance
+refresh then replaces the instance, and the old one keeps serving until the new one
+passes `/readyz`. A fresh database needs `schema.sql` applied once, by hand, over an
+SSM session (see [known gaps](docs/known-gaps.md#aws)).
+
 ## API
 
 | Endpoint | Returns | Notes |
@@ -128,7 +185,7 @@ Three panels, one for each RED question: **R**ate (requests per second by route)
 The screenshot shows the database stopped for a few minutes under steady traffic.
 The error ratio climbs, `/scores/top` p95 rises to the 2s pool timeout, and both
 recover once the database is back. The earlier dip at about 15:52 is the api containers
-restarting during a `make up`, not part of the outage (see Known gaps).
+restarting during a `make up`, not part of the outage (see [known gaps](docs/known-gaps.md#build-and-supply-chain)).
 
 ```promql
 sum by (route) (rate(scoreboard_http_requests_total[1m]))
@@ -140,230 +197,33 @@ histogram_quantile(0.95,
   sum by (le, route) (rate(scoreboard_http_request_duration_seconds_bucket[5m])))
 ```
 
-## Design decisions and tradeoffs
+## More detail
 
-**The connection pool lives in `lifespan`, not in the request path.** A pool created
-per-request leaks threads and eventually raises `RuntimeError: cannot join current
-thread`. It's an app-scoped resource, so it's opened once at startup and handed to
-handlers through a dependency.
-
-**The container healthcheck probes its own hostname, not `localhost`.** A healthcheck
-curling `localhost` cannot detect the most likely bind-address fault — a process
-listening on `127.0.0.1` instead of `0.0.0.0` answers itself happily while being
-unreachable from outside. Verified empirically; it's why the `HEALTHCHECK` uses
-`socket.gethostname()`.
-
-**Multi-stage build, digest-pinned base, non-root.**
-`ARG PY=python:3.12.14-slim-trixie@sha256:…` shared by both stages, dependencies
-resolved in the builder with a cache mount, only the virtualenv copied forward.
-338MB → **66.6MB**. Runs as `USER 10001`.
-
-**Memory limits are measured, not guessed — where that's possible.** The API limit is
-~2.6× the observed peak under 15k requests at 100 concurrent; the Postgres limit is
-deliberately *not* usage-derived, because it exists to decide which process the OOM
-killer takes rather than to right-size anything. Numbers and reasoning in
-**[baseline-stats.md](baseline-stats.md)**.
-
-**Caddy's `dynamic a` upstream discovery was a knowing tradeoff.** It enabled
-`compose up --scale`, but it silently disabled active health checks, the admin API
-upstream list, and the `caddy_reverse_proxy_upstreams_healthy` metric — verified by
-observing zero active-checker log lines and `[]` from the admin API. Health became
-passive only. Kubernetes separates these concerns properly: Services do discovery,
-readiness probes do health, independently. That tradeoff is the clearest argument for
-the migration in this repo.
-
-**Logs are JSON on stdout, one line per request.** structlog writes JSON when stdout
-isn't a terminal and a readable console format when it is. Containers log to stdout
-because that's what `docker logs`, and later CloudWatch, reads. A log file inside a
-container is a file nobody reads.
-
-**Context is added by a processor, not a bound logger.** `service`, `env`, `hostname`,
-`git_sha` and `build_time` are added by a processor in structlog's `pre_chain`. A bound
-logger only reaches records that go through it. The processor also reaches uvicorn's
-and psycopg's own records, and those are the ones you need during a bad deploy.
-
-**The middleware owns the request line, not uvicorn.** uvicorn's access log is off
-(`--no-access-log`), because two loggers writing one request line would count every
-request twice. uvicorn's own logging setup is replaced by a no-op `logging.json`.
-Without that, uvicorn attaches its own handlers and its records never reach ours.
-`--log-config /dev/null` doesn't work for this: uvicorn treats any path that isn't
-JSON or YAML as an INI file, and Python 3.12 rejects an empty one.
-
-**Every log line carries the image's git SHA.** `GIT_SHA` and `BUILD_TIME` are passed
-as build args and become `ENV` in the runtime stage, after every `COPY`. `BUILD_TIME`
-changes on every build, and a changed `ARG` or `ENV` invalidates every layer after it.
-Any earlier in the stage, every build would re-copy the venv and the source.
-
-**Request IDs are validated, not trusted.** An inbound `X-Request-ID` is kept only if
-it matches `[A-Za-z0-9_-]{1,64}`. Otherwise a new one is generated. Accepting it
-unchecked would put a client-controlled string of any length on every log line. The
-ID is bound with contextvars, so every log line in the request carries it.
-
-**Sync endpoints pass log context up through `request.state`.** The endpoints are plain
-`def`, so FastAPI runs them in a threadpool. contextvars are copied *into* the worker
-thread but not back out. Anything an endpoint or dependency wants on the request line
-goes in `request.state.log_context`, a dict the middleware reads after the endpoint
-returns.
-
-**Database errors go to the log, not the client.** A 503 body says `Database
-unavailable` and nothing else. The exception, its traceback and `db_host` go on the
-request line, under the same `request_id` as the response header. Before this fix, the
-raw psycopg error text went into the response body. Through the pool that's the
-`PoolTimeout` message. On other failure paths psycopg names the host, port and user.
-
-**Logged tracebacks never include local variables.** Tracebacks are rendered with
-`show_locals=False`. structlog's `dict_tracebacks` shorthand defaults to `True`, which
-put the full DSN, password included, into the log from a stack frame's locals. The
-`redact` processor can't catch that, for two reasons. It runs in `pre_chain`, *before*
-the traceback is rendered. And it only checks top-level keys, while locals are nested
-inside the traceback.
-
-**`scoreboard_db_ready` is set by `/readyz`, not by the scrape.** This coupling is
-deliberate. Querying the database on every `GET /metrics` would make the metrics endpoint
-a free way to send load to the database. Instead, whatever already probes readiness on a
-timer keeps the gauge fresh: the compose `HEALTHCHECK` every 10s, the k8s
-`readinessProbe`, and later the ALB health check. Removing those probes silently freezes
-the gauge. See Known gaps.
-
-**Metric labels are bounded by design.** Requests are labelled by the matched route
-template, with unmatched paths collapsed into `__unmatched__`, never by the raw path or
-the request ID. A scanner trying ten thousand URLs produces one series, not ten thousand.
-Histogram buckets come from measured latencies (`/livez` ~0.5ms, `/scores/top` ~1.4ms,
-`/readyz` ~7ms, a pool-timeout 503 ~2s), not the library defaults, which start at 5ms
-and would put almost every request in the first bucket.
-
-**Prometheus finds the replicas through DNS, not a fixed address.** `make up` runs two
-api containers behind one name. A static `api:8000` target goes through Docker's
-round-robin DNS, so each scrape hits a different replica. Both counters end up in one
-series, and every switch looks like a counter reset to `rate()`. `dns_sd_configs` looks
-up all of `api`'s A records instead and scrapes each container as its own target, with
-its own `instance` label. Caddy's `dynamic a` block uses the same mechanism to route
-traffic. When containers are replaced, both pick up the new addresses within 5s.
-
-**The dashboard is a file in the repo, not something clicked together in the UI.**
-Grafana loads the datasource and `scoreboard.json` from `grafana/provisioning/` on
-startup. A dashboard saved in the UI lives in the container's internal database and is
-gone when the container is removed. To change it, edit it in the UI, copy the JSON, and
-replace the file. Grafana won't save over a provisioned dashboard. The datasource has a
-fixed `uid: prometheus`, because the exported JSON refers to the datasource by uid.
-Without it, Grafana makes up a new random uid on every fresh start, and every panel
-reports "datasource not found".
-
-**The error panel reads 0%, not "No data", when nothing is failing.** No 5xx series
-exists until the first 5xx happens, and dividing an empty result gives an empty result.
-`or vector(0)` substitutes 0 for the missing top half of the ratio.
-
-**Successful scrapes aren't logged.** Two replicas scraped every 5s produced 24 request
-lines a minute that buried real traffic. Most scrape failures (container down, network)
-never reach the app, so the app couldn't log them anyway. Prometheus records them itself,
-in `up` and `scrape_duration_seconds`. A `/metrics` response of 500 or above is still
-logged.
-
-**The error-rate alert needs both a ratio and enough traffic.**
-`ScoreboardHighErrorRate` fires when more than 5% of requests are 5xx for 5 minutes,
-*and* traffic is above 0.1 req/s. Without the traffic condition, one failed request on
-an idle service is a 100% error rate. The rule has `promtool` unit tests, and each test
-was checked by breaking the rule on purpose. Deleting the traffic condition fails the
-"stays quiet on a low-traffic service" test. Setting `for: 0m` fails the "fires after
-5 minutes" test at minute 3. The test the plan originally suggested for the traffic
-condition (a single failed request) passed even with the condition deleted: `for: 5m`
-alone kept it quiet. Measured against a real database outage, the alert went pending
-after 2m52s and fired after **7m52s**. What to do when it fires is in
-**[docs/runbook.md](docs/runbook.md)**.
-
-**Prometheus and Grafana listen on 127.0.0.1 only, and Grafana allows anonymous
-viewing.** Prometheus has no authentication at all. Anonymous Viewer is a deliberate
-choice, so the dashboard opens without a login for a demo or a screenshot. Both choices
-are only safe because the ports aren't reachable from the network. Editing needs the
-admin login (`GRAFANA_PASSWORD`, default `admin`).
-
-**The ingress-nginx manifest is vendored, not applied from a URL.** Pinned to
-`controller-v1.15.1`. Vendoring means the version can't drift and — more importantly —
-the manifest can be patched: the upstream kind provider dropped the `ingress-ready`
-nodeSelector, so without re-adding it the controller schedules onto a node with no host
-port mapping and every request hangs with no error logged anywhere. You cannot patch a
-URL.
+| Document | What's in it |
+|---|---|
+| [Design decisions](docs/design-decisions.md) | 22 decisions about the app, the image, logging, metrics and alerting |
+| [AWS deployment](docs/aws.md) | health checks, safe deploys, secrets, shell access, logs, CI, cost |
+| [Postmortem](docs/postmortem-db-outage.md) | an induced RDS outage, timed from AWS's own records |
+| [Runbook](docs/runbook.md) | what to do when the alert fires |
+| [Known gaps](docs/known-gaps.md) | all 28, grouped, each with its fix |
+| [Baseline stats](baseline-stats.md) | measured memory use, and why each limit is what it is |
+| [Evidence](docs/evidence/) | captioned screenshots |
 
 ## Known gaps
 
-Known, not hidden. Each has a decided fix.
+Known, not hidden. All 28, grouped and each with a fix, are in
+**[docs/known-gaps.md](docs/known-gaps.md)**. The five that matter most:
 
-- **Schema is owned by `initdb`, which only runs against an empty data directory.**
-  Editing `k8s/db-initdb-configmap.yaml` will silently never apply to an existing
-  database. This seeds; it does not migrate. Needs a migration tool (Alembic, dbmate) as
-  an initContainer or Job.
-- **Restore is not properly validated.** A `pg_dump` → restore cycle emitted
-  `ERROR: relation "scores" already exists` and still appeared to succeed, because the
-  existing table happened to match. Needs `--clean --if-exists` and a test against a
-  non-trivial dataset.
-- **Two things aren't reproducible from git:** the app Secret (a template is committed,
-  the real values are not) and the GHCR `imagePullSecret`, created by hand. Both should
-  come from CI or an external secret store.
-- **Nine raw manifests, no templating.** Fine for one environment, wrong for two.
-  Helm or Kustomize.
-- **CI builds the image but doesn't publish it.** Every PR runs lint, type checks,
-  tests, the `promtool` checks and a full image build. Pushing to GHCR is still done by
-  hand. Publishing from CI needs registry credentials, and a pull request from a fork
-  must never be able to reach them.
-- **A single-replica database as a `Deployment` would deadlock** — RWO volume,
-  `maxUnavailable` rounds down to 0, the new pod waits for a volume the old pod won't
-  release. It's a StatefulSet, which sidesteps that, but the honest answer for a
-  single-instance database is `strategy: Recreate` and accepting the downtime.
-- **`scoreboard_db_ready` goes stale if nothing probes `/readyz`.** It keeps showing
-  the last value it was set to, so it can be out of date but never invented. It reads 0
-  from process start until the first probe. Each replica updates its own gauge on its
-  own healthcheck schedule, so two replicas can briefly disagree.
-- **Metrics assume one worker per container.** Each uvicorn process keeps its own
-  counters in memory. Replicas are fine: each container is a separate scrape target and
-  Prometheus adds them up. Running `--workers N` inside one container is not fine: the
-  workers share one port, so each scrape would show a random worker's numbers. That
-  would need `PROMETHEUS_MULTIPROC_DIR` and a `MultiProcessCollector`.
-- **`forwarded_for` is logged exactly as received.** `X-Forwarded-For` can be set by
-  the client, so it isn't trusted as identity. Unlike `client_ip`, it isn't
-  IP-redacted either.
-- **The app can't be imported without database settings.** `settings = AppSettings()`
-  and `db_url` run when `app.py` is imported, so the tests set fake `DB_*` variables
-  before importing it (see `tests/conftest.py`). Building settings inside `lifespan` or
-  a function would remove that coupling. There are no integration tests against a real
-  Postgres yet. The four tests cover request ID handling, the 503 body and metric labels
-  without a database.
-- **`/readyz` discards the reason for a failure.** Its 503 detail is correctly
-  generic, but the exception isn't logged, so a failing readiness check leaves no
-  record of why. Only the `scoreboard_db_ready` gauge changes.
-- **p95 latency is an estimate, and it can be well off.** `histogram_quantile` only
-  knows which bucket a request fell in, and it assumes requests are spread evenly
-  inside that bucket. Measured: `/livez` p95 read **2.2ms** on the dashboard, but the
-  exact `duration_ms` values from the logs for the same 5 minutes gave **1.3ms**. Most
-  requests were just over 1ms, inside a 1ms–2.5ms bucket. Pool-timeout requests at
-  about 2.0s showed as about 2.4s for the same reason. The fix is an extra bucket at
-  `0.0015`. Every bucket adds a series for each method, route and instance, so it
-  hasn't been added yet.
-- **The app only measures requests that reach it.** During the outage in the screenshot,
-  Caddy's passive health check (`unhealthy_status 5xx`) marked *both* replicas down and
-  answered requests itself, including `/livez`, which doesn't use the database. Those
-  requests never reached the middleware. Healthy requests disappeared from the count
-  along with failing ones, so the error ratio peaked at about 97%, higher than what
-  clients actually saw. It also slows the alert down. During an outage only about 0.3
-  req/s of errors reach the app, instead of the ~8 req/s the clients are sending, so
-  the 5-minute ratio takes about 3 minutes to pass 5% instead of about 15 seconds. Fix:
-  scrape Caddy's own metrics as well, and on AWS use the load balancer's request
-  metrics.
-- **A firing alert notifies nobody.** There's no Alertmanager, so the alert only shows
-  up at http://localhost:9090/alerts. Routing it to a pager or a chat channel is
-  Alertmanager's job.
-- **The alert misses short outages and outages on a quiet service.** A measured 1m55s
-  database outage peaked at a 2.5% error ratio and never fired. Below 0.1 req/s, the
-  traffic condition blocks the alert even if every request fails. Docker's `/readyz`
-  healthchecks (0.2 req/s) count as traffic, so during a database outage they're what
-  keeps the alert able to fire. They're also most of the "failing requests". A separate
-  `scoreboard_db_ready == 0` alert would cover "broken while quiet".
-- **Every `make up` restarts the api containers**, even when every build step is
-  `CACHED`. `BUILD_TIME` is new on every run, so the image's `ENV` changes and so does its
-  ID. Using the last commit's timestamp would make the image change only when the code
-  does.
-- **In production this would be a managed database** (RDS/Cloud SQL), not a hand-rolled
-  StatefulSet. Running Postgres in-cluster costs staff time; if it had to be in-cluster
-  it should use an operator, not this.
+1. **The database password rotates every 7 days, but the app reads it once, at boot.**
+   After a rotation, new connections fail until the instance is replaced.
+2. **No TLS.** The load balancer serves HTTP only, and the database certificate isn't
+   verified.
+3. **Alerts notify nobody.** Neither the Prometheus alert nor the CloudWatch alarm is
+   routed to a person.
+4. **No migration tool.** The schema is seeded by `initdb` or applied by hand, on all
+   three platforms.
+5. **One of everything.** One instance and a single-AZ database. The outage drill lasted
+   10 minutes.
 
 ## Layout
 
@@ -389,16 +249,33 @@ grafana/provisioning/
   dashboards/dashboards.yml    loads every .json in this folder
   dashboards/scoreboard.json   the RED dashboard, exported from the UI
 docs/
-  grafana-red-db-outage.png    the dashboard during a database outage
+  design-decisions.md          why the code and config are the way they are
+  aws.md                       the AWS deployment, piece by piece
+  known-gaps.md                every known gap, grouped, with its fix
+  postmortem-db-outage.md      the induced RDS outage: timeline, MTTD, what to change
   runbook.md                   what to do when each alert fires
+  grafana-red-db-outage.png    the dashboard during a database outage
 Makefile                  up / down / destroy / fmt / lint
 bench.sh                  build time + image size, appended to benchmarks.md
 baseline-stats.md         measured usage, and why each mem_limit is what it is
 .env.example              the five variables Compose needs
-.github/workflows/ci.yml  lint, typecheck, test, promtool, image build on every PR and on main
+.github/workflows/
+  ci.yml                  lint, typecheck, test, promtool, image build on every PR and on main
+  publish.yml             on push to main: build the arm64 image, push to ECR via OIDC
 .dockerignore             keeps .env, k8s/ (incl. the real Secret), terraform/, monitoring config and caches out of the image
-terraform/envs/dev/
-  backend.tf              S3 remote state, native lockfile, default_tags
+terraform/
+  envs/dev/
+    backend.tf            S3 remote state, native lockfile, default_tags
+    main.tf               calls the service module; image_tag picks what's deployed
+    github.tf             GitHub OIDC provider and the publish role CI assumes
+  modules/service/
+    main.tf               VPC, subnets, routes, security groups, ECR repository
+    alb.tf                load balancer, target group (/readyz), listener
+    asg.tf                launch template, ASG, instance refresh, lifecycle hook, alarm
+    user_data.sh.tftpl    boot: pull image, read DB secret, run container, report ready
+    rds.tf                Postgres 16 with an RDS-managed password
+    iam.tf                instance role: SSM, ECR pull, one secret, one log group
+    logs.tf               log group with 7-day retention
 k8s/
   kind-cluster.yaml       3-node cluster, extraPortMappings, ingress-ready label
   ingress-nginx.yaml      vendored controller-v1.15.1, nodeSelector patched
