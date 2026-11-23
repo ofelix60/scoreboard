@@ -163,7 +163,7 @@ async def request_logger(request: Request, call_next):
         client_ip=redact_ip(request.client.host)
         if request.client
         else None,  # the connection's IP (proxy: Caddy or the ALB)
-        forwarded_for=redact_forwarded_for(request.headers.get("x-forwareded-for")),
+        forwarded_for=redact_forwarded_for(request.headers.get("x-forwarded-for")),
         user_agent=request.headers.get("user-agent"),
         exc_info=exc,
         **ctx,
