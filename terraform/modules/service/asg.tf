@@ -55,6 +55,7 @@ resource "aws_launch_template" "app" {
     db_port       = aws_db_instance.this.port
     db_name       = aws_db_instance.this.db_name
     db_secret_arn = aws_db_instance.this.master_user_secret[0].secret_arn
+    log_group     = aws_cloudwatch_log_group.app.name
   }))
 
   # default_tags don't reach instances an ASG launches; tag them explicitly.
@@ -100,10 +101,10 @@ resource "aws_autoscaling_group" "app" {
       max_healthy_percentage = 200
     }
   }
-  # New instances read the DB secret at boot. Nothing in the launch template
-  # references this policy, so without this the refresh can start before the
-  # permission exists.
-  depends_on = [aws_iam_role_policy.app_db_secret]
+  # New instances read the DB secret and start the log driver at boot, and
+  # either failing stops the container. Nothing in the launch template
+  # references these policies, so without this the refresh can start first.
+  depends_on = [aws_iam_role_policy.app_db_secret, aws_iam_role_policy.app_logs]
 }
 
 # The ASG won't replace a wedged-but-running instance (EC2 health checks).
