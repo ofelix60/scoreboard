@@ -1,5 +1,9 @@
 # AWS deployment
 
+![The AWS runtime: clients reach the ALB through the internet gateway, the ALB forwards to an EC2 instance in an Auto Scaling group, and the instance reaches RDS in a private subnet. Security group rules are labelled on each hop.](diagrams/aws-runtime.drawio.png)
+
+The same in text, with what each instance does at boot:
+
 ```
 client ──► ALB :80 (public subnets, 2 AZs)
              │  target group: GET /readyz every 10s
@@ -19,6 +23,10 @@ images            GitHub Actions ──OIDC──► ECR (build and push only)
 `terraform/modules/service` holds all of it, and `terraform/envs/dev` calls it with
 values for dev. State lives in S3 with native locking. That's 52 resources, and
 `terraform plan -detailed-exitcode` returns 0 against the running stack.
+
+The diagrams are drawn in [draw.io](https://app.diagrams.net). The source is
+[diagrams/aws.drawio](diagrams/aws.drawio), and each exported PNG also embeds it, so
+either one opens for editing in draw.io.
 
 Every claim here has a measurement or a record behind it. The screenshots are in
 [evidence/](evidence/), and the outage is written up in
@@ -81,6 +89,11 @@ not by name. A repository recreated under the same name gets a new ID, so it can
 assume the role. CloudTrail shows it working in both directions: `main` gets
 credentials, and another branch of the same repo gets `AccessDenied`. `terraform apply`
 still runs by hand. CI can publish an image but can't change infrastructure.
+
+![Build and deploy: a push to main runs publish.yml, which trades an OIDC token for the gha-publish role and pushes the image to ECR. A pull request's token is refused. Separately, a person sets image_tag and runs terraform apply, which starts an instance refresh; the new instance waits until /readyz passes before joining the target group.](diagrams/aws-delivery.drawio.png)
+
+Steps ① and ② are CI publishing an image. Steps ③ to ⑥ are a person deploying it, and
+⑤ to ⑥ are the wait for `/readyz` described [above](#a-deploy-waits-for-readyz-not-for-the-vm).
 
 ### What an outage looks like, measured
 
